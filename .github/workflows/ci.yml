@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  windows-msvc:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      # The repo vendors premake5.exe (vendor/premake5/), so generation needs no
+      # download and stays version-locked to what the library was authored against.
+      - name: Generate (VS2022 solution)
+        run: .\vendor\premake5\premake5.exe vs2022
+
+      - name: Build Release
+        run: msbuild Manifold2D.sln /p:Configuration=Release /m /nologo
+
+      - name: Test Release
+        run: .\bin\Release-windows-x86_64\Manifold2DTests\Manifold2DTests.exe
+
+  # A Linux job (gcc + clang) is added in Part B, after the cross-platform
+  # burn-down passes. Part A ships the windows-msvc job only -- no red CI.
