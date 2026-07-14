@@ -1,8 +1,9 @@
 // SimdSmokeSum -- a tiny end-to-end smoke over the Manifold2D::Simd wide-float
-// wrapper (sums an array via f32w). Exercised by SimdWideTests; compiling it in
-// a real TU also forces the wrapper to instantiate.
+// wrapper (sums an array via f32w). Exercised by SimdWideTests; compiling it as
+// a real test TU also forces the wrapper to instantiate outside header-inline
+// use. Test-only -- deliberately kept out of the shipping library (src/).
 #include <Manifold2D/Core/Simd.hpp>
-#include <Manifold2D/Core/SimdSmoke.hpp>
+#include <Support/SimdSmoke.hpp>
 
 namespace Manifold2D { namespace Simd {
 

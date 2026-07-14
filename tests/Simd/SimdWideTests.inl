@@ -1,7 +1,7 @@
 // Shared [simd] test bodies. Included by SimdWideTest.cpp (active backend) and
 // SimdWideScalarTest.cpp (forced scalar). Width-agnostic: loops f32w::width.
 #include <Manifold2D/Core/Simd.hpp>
-#include <Manifold2D/Core/SimdSmoke.hpp>
+#include <Support/SimdSmoke.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
