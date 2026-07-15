@@ -1,6 +1,6 @@
 #pragma once
 
-// Test-only std::thread pool implementing Manifold2D::IWorkScheduler, so the
+// Test-only std::thread pool implementing Mosaic::IWorkScheduler, so the
 // MT-invariance suites can exercise the parallel ParallelFor paths. The library
 // itself creates no threads -- this lives in tests/ only (mirrors Astra's
 // tests/Support/TestWorkerPool.hpp). It replaces the enki-backed
@@ -15,8 +15,8 @@
 // spawned threads). This is exactly what the solver-MT / broadphase-MT /
 // narrowphase-MT paths rely on to index per-worker scratch without locking.
 
-#include <Manifold2D/Core/WorkScheduler.hpp>
-#include <Manifold2D/Core/FunctionRef.hpp>
+#include <Mosaic/Jobs/WorkScheduler.hpp>
+#include <Mosaic/FunctionRef.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -25,14 +25,14 @@
 
 namespace Manifold2D::Testing
 {
-    class TestWorkScheduler final : public Manifold2D::IWorkScheduler
+    class TestWorkScheduler final : public Mosaic::IWorkScheduler
     {
     public:
         explicit TestWorkScheduler(std::uint32_t workers)
             : m_workers(workers < 1u ? 1u : workers) {}
 
         void ParallelFor(std::size_t count, std::size_t minBatch,
-                         Manifold2D::FunctionRef<void(std::size_t, std::size_t,
+                         Mosaic::FunctionRef<void(std::size_t, std::size_t,
                                                       std::uint32_t)> fn) override
         {
             if (count == 0) return;

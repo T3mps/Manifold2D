@@ -19,7 +19,7 @@
 // ONE CONTACT PER LANE (the Box2D-v3 layout)
 // ----------------------------------------------------------------------------
 // A batch packs `width` independent contacts -- one per SIMD lane -- where
-// `width` is Manifold2D::Simd::f32w::width (8 on AVX2, 4 on NEON, 1 forced-scalar).
+// `width` is Mosaic::Simd::f32w::width (8 on AVX2, 4 on NEON, 1 forced-scalar).
 // A contact carries up to 2 manifold points, so the per-POINT fields are
 // arrays-of-2-of-lane-arrays (points[0], points[1]); the per-CONTACT fields
 // (normal, friction, masses, ...) are single lane arrays. We pack per-CONTACT
@@ -78,7 +78,7 @@
 #include <cstdint>
 #include <vector>
 
-#include <Manifold2D/Core/Simd.hpp>                  // Manifold2D::Simd::f32w::width + ops
+#include <Mosaic/Simd/Wide.hpp>                  // Mosaic::Simd::f32w::width + ops
 #include <Manifold2D/Physics/Solver/BodyState.hpp>   // gather/scatter target (T5 solve -> AoS)
 #include <Manifold2D/Physics/Solver/Solver.hpp>       // ContactConstraint / ...Point
 
@@ -86,10 +86,10 @@
 // already pulls these in for the active backend; re-including under the SAME ladder
 // arm keeps the transpose helpers self-documenting. The transpose width is lane-
 // count-specific, so it lives here (a physics-SIMD helper) -- NOT as a portable
-// Manifold2D::Simd primitive.
-#if defined(__AVX2__) && !defined(ARCANE_SIMD_SCALAR)
+// Mosaic::Simd primitive.
+#if defined(MOSAIC_HAS_AVX2) && !defined(MOSAIC_SIMD_SCALAR)
     #include <immintrin.h>
-#elif (defined(__ARM_NEON__) || defined(__ARM_NEON)) && !defined(ARCANE_SIMD_SCALAR)
+#elif defined(MOSAIC_HAS_NEON) && !defined(MOSAIC_SIMD_SCALAR)
     #include <arm_neon.h>
 #endif
 
@@ -117,7 +117,7 @@ namespace Manifold2D
             // Lane width == the active SIMD float width (8 AVX2 / 4 NEON / 1
             // scalar). A batch holds exactly this many contacts (the tail batch
             // pads the unused lanes -- see `count` + Build's padding path).
-            static constexpr int kWidth = static_cast<int>(Manifold2D::Simd::f32w::width);
+            static constexpr int kWidth = static_cast<int>(Mosaic::Simd::f32w::width);
 
             // Per-POINT lane arrays (a contact has up to 2 of these). Mirrors
             // ContactConstraintPoint, transposed to SoA. pointValid is the float
@@ -432,7 +432,7 @@ namespace Manifold2D
 
         // ====================================================================
         // Lane-wide contact solve passes (Task 5) -- the TGS-Soft math ported
-        // from SoftStep.cpp, per lane, over Manifold2D::Simd.
+        // from SoftStep.cpp, per lane, over Mosaic::Simd.
         // ====================================================================
         //
         // Each pass takes the per-color batch vector + the solver's BodyStateStore
@@ -477,10 +477,10 @@ namespace Manifold2D
 
         namespace SimdSolve
         {
-            using namespace Manifold2D::Simd;
+            using namespace Mosaic::Simd;
 
             // Turn a 1.0f/0.0f float mask lane array into a b32w predicate.
-            ARCANE_SIMD_INLINE b32w MaskOf(const float* maskArr) noexcept
+            MOSAIC_FORCEINLINE b32w MaskOf(const float* maskArr) noexcept
             {
                 return cmp_gt(load(maskArr), setzero());
             }
@@ -514,7 +514,7 @@ namespace Manifold2D
 
             // Per-lane row pointers with the null-index identity select. Fills p[W]
             // (idx >= 0 -> &states[idx]; -1 -> &kIdentityRow).
-            ARCANE_SIMD_INLINE void GatherRowPtrs(const BodyState* states, i32w idx,
+            MOSAIC_FORCEINLINE void GatherRowPtrs(const BodyState* states, i32w idx,
                                                   const BodyState** p) noexcept
             {
                 constexpr int W = ContactConstraintSimd::kWidth;
@@ -527,13 +527,13 @@ namespace Manifold2D
             }
 
             // Full gather (vx,vy,w,dpx,dpy,dq) -- feeds SolveNormalAndFriction.
-            ARCANE_SIMD_INLINE BodyStateW GatherBodies(const BodyState* states, i32w idx) noexcept
+            MOSAIC_FORCEINLINE BodyStateW GatherBodies(const BodyState* states, i32w idx) noexcept
             {
                 constexpr int W = ContactConstraintSimd::kWidth;
                 const BodyState* p[W];
                 GatherRowPtrs(states, idx, p);
 
-#if defined(__AVX2__) && !defined(ARCANE_SIMD_SCALAR)
+#if defined(MOSAIC_HAS_AVX2) && !defined(MOSAIC_SIMD_SCALAR)
                 // Eight aligned 256-bit row loads, then an 8x8 AoS->SoA transpose
                 // (_mm256_unpacklo/hi_ps + _mm256_shuffle_ps + _mm256_permute2f128_ps).
                 // Lane 0 is representative: other lanes are 32-aligned by construction
@@ -596,13 +596,13 @@ namespace Manifold2D
             // read no dp/dq, so this loads only each row's low 128 bits and uses a
             // reduced transpose (fewer shuffles, half the row bytes). Same null-index
             // identity select; same byte-identical pure-reorder guarantee.
-            ARCANE_SIMD_INLINE BodyVelW GatherVel(const BodyState* states, i32w idx) noexcept
+            MOSAIC_FORCEINLINE BodyVelW GatherVel(const BodyState* states, i32w idx) noexcept
             {
                 constexpr int W = ContactConstraintSimd::kWidth;
                 const BodyState* p[W];
                 GatherRowPtrs(states, idx, p);
 
-#if defined(__AVX2__) && !defined(ARCANE_SIMD_SCALAR)
+#if defined(MOSAIC_HAS_AVX2) && !defined(MOSAIC_SIMD_SCALAR)
                 // Load the low __m128 (vx,vy,w,dpx) of each row; build 256-bit lane
                 // pairs (lanes 0-3 | 4-7), then unpack + shuffle to vx/vy/w. No
                 // permute2f128 needed (insertf128 already placed the high lanes).
@@ -652,7 +652,7 @@ namespace Manifold2D
             // body's dp/dq -- integrated separately -- are left untouched. Uses a
             // store-to-temp / scalar write-back (AVX2 has no scatter instruction; and
             // a per-field masked write is the natural form for partial-row writes).
-            ARCANE_SIMD_INLINE void ScatterVel(BodyState* states, i32w idx,
+            MOSAIC_FORCEINLINE void ScatterVel(BodyState* states, i32w idx,
                                                f32w vx, f32w vy, f32w w, b32w write) noexcept
             {
                 constexpr int W = ContactConstraintSimd::kWidth;

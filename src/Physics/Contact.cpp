@@ -93,7 +93,7 @@ namespace Manifold2D
             --m_live;
         }
 
-        void ContactPool::ForEach(FunctionRef<void(std::uint32_t id, Contact&)> fn)
+        void ContactPool::ForEach(Mosaic::FunctionRef<void(std::uint32_t id, Contact&)> fn)
         {
             // Ascending id order is the determinism seam -- iterate the dense
             // pool, NOT the unordered_map.
@@ -104,7 +104,7 @@ namespace Manifold2D
             }
         }
 
-        void ContactPool::ForEach(FunctionRef<void(std::uint32_t id, const Contact&)> fn) const
+        void ContactPool::ForEach(Mosaic::FunctionRef<void(std::uint32_t id, const Contact&)> fn) const
         {
             // Same ascending-id walk, read-only (Phase 3 Task 3).
             for (std::uint32_t id = 0; id < m_pool.size(); ++id)

@@ -28,7 +28,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include <Manifold2D/Core/FunctionRef.hpp>
+#include <Mosaic/FunctionRef.hpp>
 
 #include <Manifold2D/Physics/Fixture.hpp>        // pulls in PhysicsTypes.hpp (kInvalidSlot)
 #include <Manifold2D/Physics/Narrowphase/Manifold.hpp>
@@ -171,8 +171,8 @@ namespace Manifold2D
 
             // Visit live contacts in ascending id order (deterministic). A const
             // overload (Phase 3 Task 3 walks the pool read-only).
-            void ForEach(FunctionRef<void(std::uint32_t id, Contact&)> fn);
-            void ForEach(FunctionRef<void(std::uint32_t id, const Contact&)> fn) const;
+            void ForEach(Mosaic::FunctionRef<void(std::uint32_t id, Contact&)> fn);
+            void ForEach(Mosaic::FunctionRef<void(std::uint32_t id, const Contact&)> fn) const;
             void Clear();
 
         private:

@@ -66,8 +66,8 @@
 #include <optional>
 #include <vector>
 
-#include <Manifold2D/Core/FunctionRef.hpp>
-#include <Manifold2D/Core/WorkScheduler.hpp>
+#include <Mosaic/FunctionRef.hpp>
+#include <Mosaic/Jobs/WorkScheduler.hpp>
 
 #include <Manifold2D/Physics/PhysicsTypes.hpp>
 #include <Manifold2D/Physics/Shapes.hpp>
@@ -535,8 +535,8 @@ namespace Manifold2D
 
             // Phase D1: inject the task executor the solver parallelizes over.
             // nullptr -> the world's owned SerialWorkScheduler (deterministic default).
-            void SetExecutor(IWorkScheduler* exec) noexcept { m_executor = exec; }
-            [[nodiscard]] IWorkScheduler* Executor() const noexcept
+            void SetExecutor(Mosaic::IWorkScheduler* exec) noexcept { m_executor = exec; }
+            [[nodiscard]] Mosaic::IWorkScheduler* Executor() const noexcept
             {
                 return m_executor ? m_executor : &m_serialExecutor;   // always valid; move-safe
             }
@@ -722,7 +722,7 @@ namespace Manifold2D
             // order. ForEachContactConstraint's visit count equals
             // ActiveContactCount().
             void ForEachContactConstraint(
-                FunctionRef<void(const ContactConstraint&)> fn) const
+                Mosaic::FunctionRef<void(const ContactConstraint&)> fn) const
             {
                 for (const ContactConstraint& cc : m_contactConstraints)
                 {
@@ -891,7 +891,7 @@ namespace Manifold2D
             // unordered iteration (unordered_map traversal -- acceptable for a
             // debug overlay).  Forwards to ContactManager::ForEachBegunPair.
             void ForEachContact(
-                FunctionRef<void(std::uint32_t a,
+                Mosaic::FunctionRef<void(std::uint32_t a,
                                  std::uint32_t b)> fn) const;
 
             // Island ROOT of slot i (debug/inspection, Phase A). Forwards to
@@ -972,7 +972,7 @@ namespace Manifold2D
             // Iterated ascending island-id (deterministic). Const callback (sleep
             // mutates bodies through the slot accessors, not the island record).
             void ForEachIsland(
-                FunctionRef<void(const std::vector<std::uint32_t>&)> fn) const
+                Mosaic::FunctionRef<void(const std::vector<std::uint32_t>&)> fn) const
             {
                 m_islandMgr.ForEachIsland(fn);
             }
@@ -1390,8 +1390,8 @@ namespace Manifold2D
             std::vector<ContactConstraint> m_contactConstraints;
 
             // ---- task executor (Phase D1) -----------------------------------
-            IWorkScheduler*         m_executor = nullptr;   // injected; null -> m_serialExecutor
-            mutable SerialWorkScheduler m_serialExecutor;   // owned deterministic fallback
+            Mosaic::IWorkScheduler*         m_executor = nullptr;   // injected; null -> m_serialExecutor
+            mutable Mosaic::SerialWorkScheduler m_serialExecutor;   // owned deterministic fallback
 
 
             // ---- joints (P2.5) ---------------------------------------------

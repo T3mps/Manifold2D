@@ -15,6 +15,7 @@ workspace "Manifold2D"
 
     IncludeDir = {}
     IncludeDir["Manifold2D"]       = "include"
+    IncludeDir["Mosaic"]           = "ThirdParty/Mosaic/include"
     IncludeDir["Catch2"]           = "vendor/Catch2/src"
     IncludeDir["rapidcheck"]       = "vendor/rapidcheck/include"
     IncludeDir["rapidcheck_catch"] = "vendor/rapidcheck/extras/catch/include"
@@ -47,7 +48,7 @@ workspace "Manifold2D"
         objdir    ("bin-int/" .. outputdir .. "/%{prj.name}")
 
         files { "include/**.hpp", "include/**.inl", "src/**.cpp" }
-        includedirs { "%{IncludeDir.Manifold2D}" }
+        includedirs { "%{IncludeDir.Manifold2D}", "%{IncludeDir.Mosaic}" }
         defines { "_CRT_SECURE_NO_WARNINGS" }
 
         filter "system:windows"
@@ -73,6 +74,7 @@ workspace "Manifold2D"
         files { "tests/**.hpp", "tests/**.inl", "tests/**.cpp" }
         includedirs {
             "%{IncludeDir.Manifold2D}",
+            "%{IncludeDir.Mosaic}",
             "%{IncludeDir.Catch2}",
             "%{IncludeDir.rapidcheck}",
             "%{IncludeDir.rapidcheck_catch}",

@@ -48,7 +48,7 @@
 // solver's data through SolverStageContext handles + FunctionRef callbacks, so
 // it never dereferences SoftStep -- keeping the two files decoupled.
 //
-// PRESENTATION-FREE + C++20-clean: std + sibling Physics headers + Manifold2D::Simd
+// PRESENTATION-FREE + C++20-clean: std + sibling Physics headers + Mosaic::Simd
 // (via ContactConstraintSimd.hpp). namespace Manifold2D::Physics.
 
 #include <atomic>
@@ -57,7 +57,7 @@
 #include <utility>
 #include <vector>
 
-#include <Manifold2D/Core/FunctionRef.hpp>
+#include <Mosaic/FunctionRef.hpp>
 #include <Manifold2D/Physics/Solver/BodyState.hpp>            // BodyState row
 #include <Manifold2D/Physics/Solver/ContactConstraintSimd.hpp> // SimdSolve range passes
 #include <Manifold2D/Physics/Solver/Solver.hpp>                // SolverContext / ContactConstraint
@@ -176,16 +176,16 @@ namespace Manifold2D
             float          threshold = 0.0f;
 
             // Body-integrate range callbacks (bound to SoftStep + ctx + h in Solve).
-            Manifold2D::FunctionRef<void(std::size_t, std::size_t)> integrateVel{};
-            Manifold2D::FunctionRef<void(std::size_t, std::size_t)> integratePos{};
+            Mosaic::FunctionRef<void(std::size_t, std::size_t)> integrateVel{};
+            Mosaic::FunctionRef<void(std::size_t, std::size_t)> integratePos{};
 
             // Main-serial inline callbacks SolverWorker invokes between colored
             // phases (Box2D solves overflow + joints on the main worker while thieves
             // spin). overflowSolve takes useBias (true=biased solve, false=relax).
-            Manifold2D::FunctionRef<void()>     overflowWarmStart{};
-            Manifold2D::FunctionRef<void(bool)> overflowSolve{};
-            Manifold2D::FunctionRef<void()>     overflowRestitution{};
-            Manifold2D::FunctionRef<void()>     jointBridge{}; // Sync->Solve->Sync (no-op if no joints)
+            Mosaic::FunctionRef<void()>     overflowWarmStart{};
+            Mosaic::FunctionRef<void(bool)> overflowSolve{};
+            Mosaic::FunctionRef<void()>     overflowRestitution{};
+            Mosaic::FunctionRef<void()>     jointBridge{}; // Sync->Solve->Sync (no-op if no joints)
         };
 
         // -----------------------------------------------------------------------

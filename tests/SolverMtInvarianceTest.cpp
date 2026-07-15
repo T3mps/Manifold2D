@@ -15,7 +15,7 @@ TEST_CASE("PhysicsWorld accepts an executor and steps with it (serial default)",
     wd.gravityX = Real(0); // zero-g: API-mechanics test, no physics content
     wd.gravityY = Real(0);
     PhysicsWorld w(wd);
-    Manifold2D::SerialWorkScheduler serial;
+    Mosaic::SerialWorkScheduler serial;
     w.SetExecutor(&serial);                 // explicit serial
     REQUIRE(w.Executor() == &serial);       // always-non-null invariant: returns the injected executor
     w.Step(1.0f / 60.0f);                   // must not crash; serial path unchanged
@@ -48,7 +48,7 @@ namespace
     // boxes spawn at negative Y (above the floor) -- same convention as
     // PhysicsAwakeSetTest. Returns (x, y, angle, vx, vy) per body after `steps`:
     // serial == enki(1) == enki(N), byte-identical across executors/thread counts.
-    std::vector<float> RunPile(Manifold2D::IWorkScheduler* exec, int steps)
+    std::vector<float> RunPile(Mosaic::IWorkScheduler* exec, int steps)
     {
         WorldDef wd; // gravityY inherits the MKS default (+10)
         PhysicsWorld w(wd);
@@ -107,7 +107,7 @@ namespace
 
 TEST_CASE("solver thread-count invariance: serial == enki(1) == enki(N)", "[physics][determinism][solvermt]")
 {
-    Manifold2D::SerialWorkScheduler serial;
+    Mosaic::SerialWorkScheduler serial;
     // Drive Manifold2D through a std::thread pool via the IWorkScheduler seam
     // (test-only; the library creates no threads). serial == 1 worker == N workers.
     const std::uint32_t hw = std::thread::hardware_concurrency();

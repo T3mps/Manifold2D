@@ -51,7 +51,7 @@
 #include <Manifold2D/Physics/Contact.hpp>               // Contact + ContactPool + FixtureHandle
 #include <Manifold2D/Physics/Broadphase/Broadphase.hpp> // BroadphasePair
 #include <Manifold2D/Physics/Solver/Solver.hpp>         // ContactConstraint
-#include <Manifold2D/Core/BitSet.hpp>                   // per-worker npState BitSets
+#include <Mosaic/BitSet.hpp>                   // per-worker npState BitSets
 
 namespace Manifold2D
 {
@@ -244,7 +244,7 @@ namespace Manifold2D
             // contactSims gather). m_npStateBits: one BitSet per worker, each Resize'd
             // to the pool id capacity per step (Box2D's per-worker contactStateBitSet).
             std::vector<std::uint32_t>  m_npContacts;
-            std::vector<Manifold2D::BitSet> m_npStateBits;
+            std::vector<Mosaic::BitSet> m_npStateBits;
 
             // ---- broadphase per-worker scratch (Phase D2, Task 3) ----------
             // Reused across steps (resize-to-WorkerCount on growth; clear per step).

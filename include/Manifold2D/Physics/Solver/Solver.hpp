@@ -44,7 +44,7 @@
 #include <Manifold2D/Physics/Narrowphase/NarrowphaseTrace.hpp>
 #include <Manifold2D/Physics/PhysicsTypes.hpp>
 
-namespace Manifold2D { struct IWorkScheduler; }
+namespace Mosaic { struct IWorkScheduler; }
 
 namespace Manifold2D
 {
@@ -218,7 +218,7 @@ namespace Manifold2D
 
             // Task-parallelism seam (Phase D1). Always non-null when the solver runs
             // (PhysicsWorld resolves it to its serial default if none was injected).
-            IWorkScheduler* executor = nullptr;
+            Mosaic::IWorkScheduler* executor = nullptr;
         };
 
         // ----------------------------------------------------------------

@@ -148,7 +148,7 @@ namespace
     // and return a flat vector of (pos.x, pos.y, angle) per dynamic-body handle.
     // This is the byte-identity oracle: same scene, different executor.
     template<typename Builder>
-    std::vector<Real> RunCapture(Manifold2D::IWorkScheduler* exec, Builder&& build)
+    std::vector<Real> RunCapture(Mosaic::IWorkScheduler* exec, Builder&& build)
     {
         WorldDef wd;
         PhysicsWorld w(wd);
@@ -260,7 +260,7 @@ namespace
     // it the span-merge MT path (per-worker span Collide -> concat -> stable_sort
     // by awakeIndex) is never exercised under multiple workers. The grid is owned
     // here (passability is a borrowed pointer) and must outlive the world.
-    std::vector<Real> RunCaptureSpans(Manifold2D::IWorkScheduler* exec)
+    std::vector<Real> RunCaptureSpans(Mosaic::IWorkScheduler* exec)
     {
         GridPassability grid(kSpanGridW, kSpanGridH);
         // Thick full-width floor (rows 40..43).
@@ -319,7 +319,7 @@ namespace
 
 TEST_CASE("Narrowphase MT == serial: state bit-identical", "[physics][mt]")
 {
-    Manifold2D::SerialWorkScheduler serial;
+    Mosaic::SerialWorkScheduler serial;
     // Drive Manifold2D through a std::thread pool via the IWorkScheduler seam (test-only).
     const std::uint32_t hw = std::thread::hardware_concurrency();
     Manifold2D::Testing::TestWorkScheduler oneSched(1);
@@ -358,7 +358,7 @@ TEST_CASE("Narrowphase MT == serial: state bit-identical", "[physics][mt]")
 TEST_CASE("Narrowphase span-path create MT == serial: state bit-identical",
           "[physics][mt]")
 {
-    Manifold2D::SerialWorkScheduler serial;
+    Mosaic::SerialWorkScheduler serial;
     // Drive Manifold2D through a std::thread pool via the IWorkScheduler seam (test-only).
     const std::uint32_t hw = std::thread::hardware_concurrency();
     Manifold2D::Testing::TestWorkScheduler oneSched(1);
@@ -401,7 +401,7 @@ TEST_CASE("Narrowphase span-path create MT == serial: state bit-identical",
 
 TEST_CASE("Narrowphase create MT == serial: state bit-identical", "[physics][mt]")
 {
-    Manifold2D::SerialWorkScheduler serial;
+    Mosaic::SerialWorkScheduler serial;
     // Drive Manifold2D through a std::thread pool via the IWorkScheduler seam (test-only).
     const std::uint32_t hw = std::thread::hardware_concurrency();
     Manifold2D::Testing::TestWorkScheduler oneSched(1);

@@ -9,7 +9,7 @@ namespace
 {
     // ~800 dynamic boxes over a floor, 50 steps while settling -> many moving
     // proxies/step (UpdatePairs work-list > grain -> real broadphase MT).
-    std::vector<float> RunActivePile(Manifold2D::IWorkScheduler* exec, int steps)
+    std::vector<float> RunActivePile(Mosaic::IWorkScheduler* exec, int steps)
     {
         WorldDef wd; // gravityY inherits the MKS default (+10)
         PhysicsWorld w(wd); w.SetExecutor(exec);
@@ -31,7 +31,7 @@ namespace
 
 TEST_CASE("broadphase thread-count invariance: serial == enki(1) == enki(N)", "[physics][determinism][broadmt]")
 {
-    Manifold2D::SerialWorkScheduler serial;
+    Mosaic::SerialWorkScheduler serial;
     // Drive Manifold2D through a std::thread pool via the IWorkScheduler seam (test-only).
     const std::uint32_t hw = std::thread::hardware_concurrency();
     Manifold2D::Testing::TestWorkScheduler oneSched(1);

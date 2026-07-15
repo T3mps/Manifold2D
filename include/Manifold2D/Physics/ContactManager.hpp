@@ -57,7 +57,7 @@
 
 #include <Manifold2D/Physics/PhysicsTypes.hpp>
 #include <Manifold2D/Physics/Broadphase/Broadphase.hpp>
-#include <Manifold2D/Core/FunctionRef.hpp>
+#include <Mosaic/FunctionRef.hpp>
 
 namespace Manifold2D
 {
@@ -193,7 +193,7 @@ namespace Manifold2D
             // Read-only; for debug draw / inspection.  Iteration order is
             // unordered (unordered_map traversal).
             void ForEachBegunPair(
-                FunctionRef<void(std::uint32_t a, std::uint32_t b)> fn) const;
+                Mosaic::FunctionRef<void(std::uint32_t a, std::uint32_t b)> fn) const;
 
         private:
             // pair key -> pair. Reused across steps (no per-step alloc).

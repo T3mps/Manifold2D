@@ -105,7 +105,7 @@ void SpatialGrid::Move(std::uint32_t id, const Aabb2& box)
 }
 
 void SpatialGrid::ForEachCell(
-    FunctionRef<void(int, int, const std::vector<std::uint32_t>&)> fn) const
+    Mosaic::FunctionRef<void(int, int, const std::vector<std::uint32_t>&)> fn) const
 {
     // Unpack each occupied cell key with the EXACT inverse of Key():
     //   Key(cx,cy) = (uint32_t(cx) << 32) | uint32_t(cy)

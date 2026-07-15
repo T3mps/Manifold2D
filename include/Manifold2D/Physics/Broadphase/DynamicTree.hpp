@@ -48,7 +48,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include <Manifold2D/Core/FunctionRef.hpp>
+#include <Mosaic/FunctionRef.hpp>
 
 #include <Manifold2D/Physics/Broadphase/Broadphase.hpp>
 #include <Manifold2D/Physics/PhysicsTypes.hpp>
@@ -97,7 +97,7 @@ namespace Manifold2D
             // depend on it. The fat box always contains the tight box (the
             // MARGIN-grown invariant) -- the overlay draws both.
             void ForEachLeaf(
-                FunctionRef<void(std::uint32_t id,
+                Mosaic::FunctionRef<void(std::uint32_t id,
                                  const Aabb2& tight,
                                  const Aabb2& fat)> fn) const;
 

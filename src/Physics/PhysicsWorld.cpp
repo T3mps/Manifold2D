@@ -2075,7 +2075,7 @@ namespace Manifold2D
         // ---- pull API for debug draw / inspection (P3.6) -------------------
 
         void PhysicsWorld::ForEachContact(
-            FunctionRef<void(std::uint32_t, std::uint32_t)> fn) const
+            Mosaic::FunctionRef<void(std::uint32_t, std::uint32_t)> fn) const
         {
             m_contacts.ForEachBegunPair(fn);
         }

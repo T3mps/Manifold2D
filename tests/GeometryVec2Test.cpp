@@ -6,7 +6,7 @@
 #include <type_traits>
 #include <catch2/catch_test_macros.hpp>
 #include <Manifold2D/Geometry/Vec2.hpp>
-#include <Manifold2D/Core/Simd.hpp>
+#include <Mosaic/Simd/Wide.hpp>
 
 using Manifold2D::Geometry::Vec2;
 using Manifold2D::Geometry::Vec2f;
@@ -73,10 +73,10 @@ TEST_CASE("Vec2: free-function expression-order KATs", "[geometry]")
 
 TEST_CASE("Vec2<f32w>: wide arithmetic core compiles and bit-matches scalar lanes", "[geometry][simd]")
 {
-    using Manifold2D::Simd::f32w;
+    using Mosaic::Simd::f32w;
     // Wide-lane construction/extraction uses the house Simd API: the lane
     // count is f32w::width and load/store are the free functions
-    // Manifold2D::Simd::load / Manifold2D::Simd::store over alignas(32) arrays
+    // Mosaic::Simd::load / Mosaic::Simd::store over alignas(32) arrays
     // (see Simd.hpp + SimdWideTests.inl). The assertion logic is pinned:
     // every lane of the wide result equals the scalar computation on that
     // lane's inputs.
@@ -87,13 +87,13 @@ TEST_CASE("Vec2<f32w>: wide arithmetic core compiles and bit-matches scalar lane
         ax[i] = 1.0f + float(i); ay[i] = 2.0f - float(i);
         bx[i] = 0.5f * float(i); by[i] = 3.0f + float(i);
     }
-    Vec2<f32w> wa(Manifold2D::Simd::load(ax), Manifold2D::Simd::load(ay));
-    Vec2<f32w> wb(Manifold2D::Simd::load(bx), Manifold2D::Simd::load(by));
+    Vec2<f32w> wa(Mosaic::Simd::load(ax), Mosaic::Simd::load(ay));
+    Vec2<f32w> wb(Mosaic::Simd::load(bx), Mosaic::Simd::load(by));
 
     alignas(32) float sv[W];
     for (int i = 0; i < W; ++i)
         sv[i] = 0.25f + float(i);
-    const f32w scale = Manifold2D::Simd::load(sv);
+    const f32w scale = Mosaic::Simd::load(sv);
 
     const Vec2<f32w> sum  = wa + wb;
     const f32w       dot  = Dot(wa, wb);
@@ -109,13 +109,13 @@ TEST_CASE("Vec2<f32w>: wide arithmetic core compiles and bit-matches scalar lane
     alignas(32) float oSumX[W], oSumY[W], oDot[W], oCrs[W],
                       oPerpX[W], oPerpY[W], oNegX[W], oNegY[W],
                       oSclX[W], oSclY[W], oAccX[W], oAccY[W];
-    Manifold2D::Simd::store(oSumX, sum.x);   Manifold2D::Simd::store(oSumY, sum.y);
-    Manifold2D::Simd::store(oDot, dot);
-    Manifold2D::Simd::store(oCrs, crs);
-    Manifold2D::Simd::store(oPerpX, perp.x); Manifold2D::Simd::store(oPerpY, perp.y);
-    Manifold2D::Simd::store(oNegX, neg.x);   Manifold2D::Simd::store(oNegY, neg.y);
-    Manifold2D::Simd::store(oSclX, scl.x);   Manifold2D::Simd::store(oSclY, scl.y);
-    Manifold2D::Simd::store(oAccX, acc.x);   Manifold2D::Simd::store(oAccY, acc.y);
+    Mosaic::Simd::store(oSumX, sum.x);   Mosaic::Simd::store(oSumY, sum.y);
+    Mosaic::Simd::store(oDot, dot);
+    Mosaic::Simd::store(oCrs, crs);
+    Mosaic::Simd::store(oPerpX, perp.x); Mosaic::Simd::store(oPerpY, perp.y);
+    Mosaic::Simd::store(oNegX, neg.x);   Mosaic::Simd::store(oNegY, neg.y);
+    Mosaic::Simd::store(oSclX, scl.x);   Mosaic::Simd::store(oSclY, scl.y);
+    Mosaic::Simd::store(oAccX, acc.x);   Mosaic::Simd::store(oAccY, acc.y);
     for (int i = 0; i < W; ++i)
     {
         const Vec2f sa(ax[i], ay[i]), sb(bx[i], by[i]);

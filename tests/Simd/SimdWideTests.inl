@@ -1,6 +1,6 @@
 // Shared [simd] test bodies. Included by SimdWideTest.cpp (active backend) and
 // SimdWideScalarTest.cpp (forced scalar). Width-agnostic: loops f32w::width.
-#include <Manifold2D/Core/Simd.hpp>
+#include <Mosaic/Simd/Wide.hpp>
 #include <Support/SimdSmoke.hpp>
 
 #include <catch2/catch_test_macros.hpp>
@@ -10,16 +10,16 @@
 #include <cstdint>
 #include <cstring>   // std::memcpy for index-vector construction (Task 5)
 
-#ifndef ARCANE_SIMD_TUTAG
-    #define ARCANE_SIMD_TUTAG "active"
+#ifndef MOSAIC_SIMD_TUTAG
+    #define MOSAIC_SIMD_TUTAG "active"
 #endif
 
-// ARCANE_SIMD_NS is defined by Simd.hpp to point at the active backend's
-// sub-namespace (e.g. ::Manifold2D::Simd::Avx2 or ::Manifold2D::Simd::Scalar).
+// MOSAIC_SIMD_NS is defined by Simd.hpp to point at the active backend's
+// sub-namespace (e.g. ::Mosaic::Simd::Avx2 or ::Mosaic::Simd::Scalar).
 // This avoids ODR violations when both TUs are linked into the same binary.
-namespace SimdT = ARCANE_SIMD_NS;
+namespace SimdT = MOSAIC_SIMD_NS;
 
-TEST_CASE("Simd[" ARCANE_SIMD_TUTAG "]: backend + width are sane", "[simd]")
+TEST_CASE("Simd[" MOSAIC_SIMD_TUTAG "]: backend + width are sane", "[simd]")
 {
     INFO("backend = " << SimdT::kBackendName << " width = " << SimdT::f32w::width);
     CHECK(SimdT::f32w::width >= 1);
@@ -29,7 +29,7 @@ TEST_CASE("Simd[" ARCANE_SIMD_TUTAG "]: backend + width are sane", "[simd]")
     CHECK(SimdT::kBackendName != nullptr);
 }
 
-TEST_CASE("Simd[" ARCANE_SIMD_TUTAG "]: splat/load/store round-trip", "[simd]")
+TEST_CASE("Simd[" MOSAIC_SIMD_TUTAG "]: splat/load/store round-trip", "[simd]")
 {
     constexpr int W = SimdT::f32w::width;
     alignas(32) float in[W];
@@ -57,7 +57,7 @@ TEST_CASE("Simd[" ARCANE_SIMD_TUTAG "]: splat/load/store round-trip", "[simd]")
     for (int i = 0; i < W; ++i) CHECK(uo[i + 1] == in[i]);
 }
 
-TEST_CASE("Simd[" ARCANE_SIMD_TUTAG "]: arithmetic matches scalar reference", "[simd]")
+TEST_CASE("Simd[" MOSAIC_SIMD_TUTAG "]: arithmetic matches scalar reference", "[simd]")
 {
     constexpr int W = SimdT::f32w::width;
     alignas(32) float a[W], b[W], c[W], out[W];
@@ -88,7 +88,7 @@ TEST_CASE("Simd[" ARCANE_SIMD_TUTAG "]: arithmetic matches scalar reference", "[
     for (int i = 0; i < W; ++i) CHECK(out[i] == std::fma(a[i], b[i], -c[i]));
 }
 
-TEST_CASE("Simd[" ARCANE_SIMD_TUTAG "]: min/max/abs/sqrt exact; rsqrt/recip approx", "[simd]")
+TEST_CASE("Simd[" MOSAIC_SIMD_TUTAG "]: min/max/abs/sqrt exact; rsqrt/recip approx", "[simd]")
 {
     constexpr int W = SimdT::f32w::width;
     alignas(32) float a[W], b[W], out[W];
@@ -116,7 +116,7 @@ TEST_CASE("Simd[" ARCANE_SIMD_TUTAG "]: min/max/abs/sqrt exact; rsqrt/recip appr
     }
 }
 
-TEST_CASE("Simd[" ARCANE_SIMD_TUTAG "]: compare/select/mask reductions", "[simd]")
+TEST_CASE("Simd[" MOSAIC_SIMD_TUTAG "]: compare/select/mask reductions", "[simd]")
 {
     constexpr int W = SimdT::f32w::width;
     alignas(32) float a[W], b[W], t[W], f[W], out[W];
@@ -151,7 +151,7 @@ TEST_CASE("Simd[" ARCANE_SIMD_TUTAG "]: compare/select/mask reductions", "[simd]
     CHECK(SimdT::any(SimdT::cmp_lt(va, vf)) == false);
 }
 
-TEST_CASE("Simd[" ARCANE_SIMD_TUTAG "]: gather/scatter round-trip", "[simd]")
+TEST_CASE("Simd[" MOSAIC_SIMD_TUTAG "]: gather/scatter round-trip", "[simd]")
 {
     constexpr int W = SimdT::f32w::width;
     // base table large enough for any index pattern.
@@ -183,7 +183,7 @@ TEST_CASE("Simd[" ARCANE_SIMD_TUTAG "]: gather/scatter round-trip", "[simd]")
     for (int i = 0; i < W; ++i) CHECK(ib[i] == i);
 }
 
-TEST_CASE("Simd[" ARCANE_SIMD_TUTAG "]: iload round-trips an int32 array -> i32w", "[simd]")
+TEST_CASE("Simd[" MOSAIC_SIMD_TUTAG "]: iload round-trips an int32 array -> i32w", "[simd]")
 {
     // iload is the int counterpart to f32w `load`: the contact solver packs each
     // lane's body slot into an alignas(32) int32_t[width] array (ContactConstraint-
@@ -219,7 +219,7 @@ TEST_CASE("Simd[" ARCANE_SIMD_TUTAG "]: iload round-trips an int32 array -> i32w
     for (int i = 0; i < W; ++i) CHECK(dst[idx[i]] == vals[i]);
 }
 
-TEST_CASE("Simd[" ARCANE_SIMD_TUTAG "]: run-twice determinism (bit-identical)", "[simd]")
+TEST_CASE("Simd[" MOSAIC_SIMD_TUTAG "]: run-twice determinism (bit-identical)", "[simd]")
 {
     constexpr int W = SimdT::f32w::width;
     auto run = [](float* out) {
@@ -240,12 +240,12 @@ TEST_CASE("Simd[" ARCANE_SIMD_TUTAG "]: run-twice determinism (bit-identical)", 
     }
 }
 
-TEST_CASE("Simd[" ARCANE_SIMD_TUTAG "]: Core pilot SimdSmokeSum matches scalar sum", "[simd]")
+TEST_CASE("Simd[" MOSAIC_SIMD_TUTAG "]: Core pilot SimdSmokeSum matches scalar sum", "[simd]")
 {
     float data[37];
     double ref = 0.0;
     for (int i = 0; i < 37; ++i) { data[i] = float(i) * 0.5f - 4.0f; ref += data[i]; }
-    float got = Manifold2D::Simd::SimdSmokeSum(data, 37);
+    float got = Mosaic::Simd::SimdSmokeSum(data, 37);
     // SoA lane-sum reorders additions -> tolerance check, not bit-exact (documents
     // that horizontal sums are order-dependent across widths).
     CHECK(std::fabs(got - static_cast<float>(ref)) <= 1e-3f * (1.0f + std::fabs(static_cast<float>(ref))));

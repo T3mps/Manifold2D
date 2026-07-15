@@ -18,7 +18,7 @@
 #include <Manifold2D/Physics/Joints/Joint.hpp>    // Joint (Prepare/SolveVelocity)
 #include <Manifold2D/Physics/Solver/SoftCoeffs.hpp>   // shared MakeSoft + SoftCoeffs
 #include <Manifold2D/Physics/Solver/BodyState.hpp>    // BodyStateStore sync defs
-#include <Manifold2D/Core/WorkScheduler.hpp>            // IWorkScheduler::ParallelFor (Phase D1)
+#include <Mosaic/Jobs/WorkScheduler.hpp>            // IWorkScheduler::ParallelFor (Phase D1)
 
 namespace Manifold2D
 {

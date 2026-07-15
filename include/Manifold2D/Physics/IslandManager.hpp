@@ -39,7 +39,7 @@
 
 #include <Manifold2D/Physics/PhysicsTypes.hpp>
 #include <Manifold2D/Physics/Island.hpp> // Island registry struct + constants (Phase A)
-#include <Manifold2D/Core/FunctionRef.hpp>
+#include <Mosaic/FunctionRef.hpp>
 
 namespace Manifold2D
 {
@@ -69,7 +69,7 @@ namespace Manifold2D
             // (empty) are skipped. Const callback (the sleep pass mutates bodies
             // through the world's slot accessors, not the island record).
             void ForEachIsland(
-                FunctionRef<void(const std::vector<std::uint32_t>&)> fn) const
+                Mosaic::FunctionRef<void(const std::vector<std::uint32_t>&)> fn) const
             {
                 for (const Island::Island& isl : m_islands)
                 {

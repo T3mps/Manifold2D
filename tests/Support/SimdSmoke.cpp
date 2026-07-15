@@ -1,11 +1,11 @@
-// SimdSmokeSum -- a tiny end-to-end smoke over the Manifold2D::Simd wide-float
+// SimdSmokeSum -- a tiny end-to-end smoke over the Mosaic::Simd wide-float
 // wrapper (sums an array via f32w). Exercised by SimdWideTests; compiling it as
 // a real test TU also forces the wrapper to instantiate outside header-inline
 // use. Test-only -- deliberately kept out of the shipping library (src/).
-#include <Manifold2D/Core/Simd.hpp>
+#include <Mosaic/Simd/Wide.hpp>
 #include <Support/SimdSmoke.hpp>
 
-namespace Manifold2D { namespace Simd {
+namespace Mosaic { namespace Simd {
 
 float SimdSmokeSum(const float* p, int count) noexcept
 {
@@ -21,4 +21,4 @@ float SimdSmokeSum(const float* p, int count) noexcept
     return sum;
 }
 
-} } // namespace Manifold2D::Simd
+} } // namespace Mosaic::Simd

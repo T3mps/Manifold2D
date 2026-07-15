@@ -27,7 +27,7 @@ namespace Manifold2D
     namespace Physics
     {
         void ContactManager::ForEachBegunPair(
-            FunctionRef<void(std::uint32_t, std::uint32_t)> fn) const
+            Mosaic::FunctionRef<void(std::uint32_t, std::uint32_t)> fn) const
         {
             for (const auto& [key, p] : m_pairs)
             {

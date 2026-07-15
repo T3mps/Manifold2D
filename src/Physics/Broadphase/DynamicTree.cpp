@@ -537,7 +537,7 @@ namespace Manifold2D
         // stored. Pure read path -- no mutation, display-order only.
         // ----------------------------------------------------------------
         void DynamicTree::ForEachLeaf(
-            FunctionRef<void(std::uint32_t,
+            Mosaic::FunctionRef<void(std::uint32_t,
                              const Aabb2&,
                              const Aabb2&)> fn) const
         {

@@ -11,7 +11,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include <Manifold2D/Core/FunctionRef.hpp>
+#include <Mosaic/FunctionRef.hpp>
 #include <Manifold2D/Physics/PhysicsTypes.hpp>
 #include <Manifold2D/Physics/Broadphase/Broadphase.hpp> // Aabb2
 
@@ -48,7 +48,7 @@ public:
     // path may depend on it). The ids vector is never empty for a live cell
     // (Remove drops a cell once it empties).
     void ForEachCell(
-        FunctionRef<void(int cx, int cy,
+        Mosaic::FunctionRef<void(int cx, int cy,
                          const std::vector<std::uint32_t>& ids)> fn) const;
 
 private:

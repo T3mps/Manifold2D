@@ -1,19 +1,19 @@
 #pragma once
 
-// Manifold2D::FunctionRef<Sig> -- a non-owning, zero-allocation callable VIEW
-// (void* + thunk). This is a standalone copy of a small leaf-vocabulary type
-// also carried by the host engine (design: docs/superpowers/specs/2026-07-10-manifold2d-phase2-lift-design.md,
-// D3) -- kept independent so Manifold2D has zero dependency on the host.
-// For SYNCHRONOUS, non-escaping callbacks only -- the referent MUST outlive the
-// FunctionRef. Do NOT store one (it would dangle); a stored callback uses an
-// owning std::function (or a future Delegate). C++26 std::function_ref-aligned:
-// this can be replaced by a using-alias when MSVC ships it.
+// Mosaic::FunctionRef<Sig> -- a non-owning, zero-allocation callable VIEW
+// (void* + thunk). For SYNCHRONOUS, non-escaping callbacks only: the referent
+// MUST outlive the FunctionRef -- do NOT store one (it would dangle); a stored
+// callback needs an owning std::function (or a Delegate). C++26
+// std::function_ref-aligned; replaceable by a using-alias when it ships.
+//
+// The one canonical Starworks copy (Manifold2D and the host engine each carried
+// their own). The IWorkScheduler seam takes its callback by this type.
 
-#include <cassert>       // assert (E01-3b empty-call guard)
+#include <cassert>
 #include <memory>
 #include <type_traits>
 
-namespace Manifold2D
+namespace Mosaic
 {
     template <class Sig> class FunctionRef;
 
@@ -44,12 +44,11 @@ namespace Manifold2D
 
         R operator()(Args... a) const
         {
-            // E01-3b: calling through an empty (default-constructed / moved-from)
-            // FunctionRef dereferences a null thunk -- UB. Debug assert on the
-            // existing bool conversion; release path is unchanged (compiles out
-            // under NDEBUG). Callers must check operator bool if emptiness is
-            // reachable.
-            assert(static_cast<bool>(*this) && "FunctionRef::operator(): call through an empty FunctionRef");
+            // Calling through an empty (default-constructed / moved-from) FunctionRef
+            // dereferences a null thunk -- UB. Debug-assert on the bool conversion;
+            // the release path compiles out under NDEBUG. Callers must check
+            // operator bool if emptiness is reachable.
+            assert(static_cast<bool>(*this) && "Mosaic::FunctionRef: call through an empty FunctionRef");
             return m_thunk(m_obj, static_cast<Args&&>(a)...);
         }
 

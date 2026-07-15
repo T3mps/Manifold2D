@@ -960,7 +960,7 @@ namespace Manifold2D
             w.Executor()->ParallelFor(m_npContacts.size(), /*minRange=*/64,
                 [&](std::size_t begin, std::size_t end, std::uint32_t worker)
                 {
-                    Manifold2D::BitSet& bits = m_npStateBits[worker];
+                    Mosaic::BitSet& bits = m_npStateBits[worker];
                     for (std::size_t k = begin; k < end; ++k)
                     {
                         const std::uint32_t id = m_npContacts[k];

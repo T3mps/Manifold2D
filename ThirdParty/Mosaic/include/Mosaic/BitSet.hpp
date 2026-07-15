@@ -1,21 +1,23 @@
 #pragma once
 
-// Manifold2D::BitSet -- a minimal fixed-capacity bit set (the b2BitSet equivalent).
-// This is the move origin for this type (design: docs/superpowers/specs/2026-07-10-manifold2d-phase2-lift-design.md,
-// D3) -- the host engine's now-duplicate copy is deleted in Task 3 once
-// Physics/Geometry retarget here.
-// Used by the narrowphase MT serial tail: each worker flags changed contact ids
-// into its own BitSet; the tail OR-reduces (InPlaceUnion) and walks set bits in
-// ascending order (ForEachSetBit, via std::countr_zero == Box2D b2CTZ64).
-// Presentation-free + C++23-clean: std only.
+// Mosaic::BitSet -- a minimal grow-only fixed-capacity bit set (the b2BitSet
+// equivalent). Move origin: Manifold2D Core/BitSet.hpp, where it backs the
+// narrowphase MT serial tail: each worker flags changed contact ids into its OWN
+// BitSet, then the tail OR-reduces (InPlaceUnion) and walks set bits in ascending
+// order (ForEachSetBit, via std::countr_zero == Box2D's b2CTZ64). That shape --
+// per-worker scratch, lock-free, reduced once -- is generic enough to belong in
+// the shared core rather than in one engine.
+//
+// Presentation-free, C++23-clean: std only.
+
+#include <Mosaic/Assert.hpp>   // MOSAIC_ASSERT (bounds guard)
 
 #include <bit>        // std::countr_zero
-#include <cassert>    // assert (E01-3a debug bounds guard)
 #include <cstddef>
 #include <cstdint>
 #include <vector>
 
-namespace Manifold2D
+namespace Mosaic
 {
     class BitSet
     {
@@ -39,11 +41,11 @@ namespace Manifold2D
 
         void Set(std::size_t i) noexcept
         {
-            // E01-3a: bounds guard. i must be < capacity (m_blockCount * 64);
-            // an out-of-range index is an OOB write into m_blocks (UB). Debug
-            // assert only -- the release path stays branch-free (assert compiles
-            // out under NDEBUG). Resize(bitCount) must precede any Set.
-            assert(i < m_blockCount * 64u && "BitSet::Set: index out of range (call Resize first)");
+            // Bounds guard: i must be < capacity (m_blockCount * 64); an out-of-range
+            // index is an OOB write into m_blocks (UB). Debug-only -- the release path
+            // stays branch-free (MOSAIC_ASSERT compiles out under NDEBUG).
+            // Resize(bitCount) must precede any Set.
+            MOSAIC_ASSERT(i < m_blockCount * 64u, "BitSet::Set: index out of range (call Resize first)");
             m_blocks[i >> 6] |= (1ull << (i & 63u));
         }
 
@@ -75,4 +77,4 @@ namespace Manifold2D
         std::vector<std::uint64_t> m_blocks;
         std::size_t                m_blockCount = 0;
     };
-} // namespace Manifold2D
+} // namespace Mosaic
