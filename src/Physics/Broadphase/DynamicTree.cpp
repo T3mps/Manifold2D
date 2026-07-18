@@ -10,7 +10,7 @@
 #include <Manifold2D/Physics/Broadphase/DynamicTree.hpp>
 
 #include <algorithm>
-#include <cassert>
+#include <Mosaic/Assert.hpp>
 #include <cmath>
 #include <vector>
 
@@ -211,9 +211,9 @@ namespace Manifold2D
             // asserts box validity for the same reason (b2AABB_IsValid). Loud in
             // Debug is the point: dropping the insert instead would desync the
             // tree from the body's SlotAabb, which is worse than a hard stop.
-            assert(std::isfinite(box.min.x) && std::isfinite(box.min.y) &&
-                   std::isfinite(box.max.x) && std::isfinite(box.max.y) &&
-                   "DynamicTree::Update: AABB must be finite");
+            MOSAIC_ASSERT(std::isfinite(box.min.x) && std::isfinite(box.min.y) &&
+                          std::isfinite(box.max.x) && std::isfinite(box.max.y),
+                          "DynamicTree::Update: AABB must be finite");
             std::uint32_t leaf = LeafOf(id);
             if (leaf != kNull)
             {

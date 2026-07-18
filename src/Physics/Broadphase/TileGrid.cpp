@@ -5,7 +5,7 @@
 #include <Manifold2D/Physics/Broadphase/TileGrid.hpp>
 
 #include <algorithm>
-#include <cassert>
+#include <Mosaic/Assert.hpp>
 #include <cmath>
 
 namespace Manifold2D
@@ -35,7 +35,7 @@ namespace Manifold2D
               m_cellSize(cellSize > Real(0) ? cellSize : Real(1)),
               m_origin(origin)
         {
-            assert(cellSize > Real(0) && "TileGrid: cellSize must be positive");
+            MOSAIC_ASSERT(cellSize > Real(0), "TileGrid: cellSize must be positive");
         }
 
         Aabb2 TileGrid::CellBox(int cx, int cy) const

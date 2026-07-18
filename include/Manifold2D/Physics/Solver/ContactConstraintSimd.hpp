@@ -74,7 +74,7 @@
 // PRESENTATION-FREE + C++20-clean: std + the Simd width constant + Solver.hpp
 // (for ContactConstraint). No SDL3/NVRHI/Batcher2D. namespace Manifold2D::Physics.
 
-#include <cassert>
+#include <Mosaic/Assert.hpp>
 #include <cstdint>
 #include <vector>
 
@@ -538,7 +538,8 @@ namespace Manifold2D
                 // (_mm256_unpacklo/hi_ps + _mm256_shuffle_ps + _mm256_permute2f128_ps).
                 // Lane 0 is representative: other lanes are 32-aligned by construction
                 // (states[] is alignas(32) stride-32; kIdentityRow is alignas(32)).
-                assert((reinterpret_cast<std::uintptr_t>(p[0]) & 31u) == 0u);
+                MOSAIC_ASSERT((reinterpret_cast<std::uintptr_t>(p[0]) & 31u) == 0u,
+                              "AVX2 gather: row pointer must be 32-byte aligned");
                 const __m256 r0 = _mm256_load_ps(reinterpret_cast<const float*>(p[0]));
                 const __m256 r1 = _mm256_load_ps(reinterpret_cast<const float*>(p[1]));
                 const __m256 r2 = _mm256_load_ps(reinterpret_cast<const float*>(p[2]));
@@ -609,7 +610,8 @@ namespace Manifold2D
                 // Lane 0 is representative: other lanes are 32-aligned by construction
                 // (states[] is alignas(32) stride-32; kIdentityRow is alignas(32)),
                 // so all lanes satisfy the 16-byte requirement checked here.
-                assert((reinterpret_cast<std::uintptr_t>(p[0]) & 15u) == 0u);
+                MOSAIC_ASSERT((reinterpret_cast<std::uintptr_t>(p[0]) & 15u) == 0u,
+                              "SSE gather: row pointer must be 16-byte aligned");
                 const __m128 m0 = _mm_load_ps(reinterpret_cast<const float*>(p[0]));
                 const __m128 m1 = _mm_load_ps(reinterpret_cast<const float*>(p[1]));
                 const __m128 m2 = _mm_load_ps(reinterpret_cast<const float*>(p[2]));

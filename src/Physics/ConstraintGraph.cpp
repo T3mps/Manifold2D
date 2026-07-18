@@ -1,7 +1,7 @@
 #include <Manifold2D/Physics/ConstraintGraph.hpp>
 
 #include <algorithm>
-#include <cassert>
+#include <Mosaic/Assert.hpp>
 #include <cmath>
 
 #include <Manifold2D/Physics/Contact.hpp>                    // Contact + ContactPool + kInvalidColor
@@ -1175,11 +1175,13 @@ namespace Manifold2D
                 // dynamic-dynamic pair shares one island, so awake-A => awake-B)
                 // guarantees this. This assertion proves SyncIn can safely skip
                 // sleeping dynamics (they are NEVER gathered by a live constraint).
-                assert(!(static_cast<BodyType>(w.m_btype[aIdx]) == BodyType::Dynamic &&
-                         w.m_awake[aIdx] == 0));
-                assert(!(bIsBody &&
-                         static_cast<BodyType>(w.m_btype[bIdx]) == BodyType::Dynamic &&
-                         w.m_awake[bIdx] == 0));
+                MOSAIC_ASSERT(!(static_cast<BodyType>(w.m_btype[aIdx]) == BodyType::Dynamic &&
+                                w.m_awake[aIdx] == 0),
+                              "emitted constraint references a sleeping dynamic (body A)");
+                MOSAIC_ASSERT(!(bIsBody &&
+                                static_cast<BodyType>(w.m_btype[bIdx]) == BodyType::Dynamic &&
+                                w.m_awake[bIdx] == 0),
+                              "emitted constraint references a sleeping dynamic (body B)");
 
                 out.push_back(cc);
                 keys.push_back(EmitSortKey{ aIdx, cc.bodyB, fixA, fixB });

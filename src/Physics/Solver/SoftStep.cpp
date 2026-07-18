@@ -11,7 +11,7 @@
 #include <Manifold2D/Physics/Solver/SoftStep.hpp>
 
 #include <algorithm>
-#include <cassert>
+#include <Mosaic/Assert.hpp>
 #include <cmath>
 
 #include <Manifold2D/Physics/PhysicsWorld.hpp>
@@ -863,7 +863,7 @@ namespace Manifold2D
 
         void SoftStep::Solve(SolverContext& ctx)
         {
-            assert(ctx.executor && "SolverContext::executor must be set (PhysicsWorld resolves a serial default)");
+            MOSAIC_ASSERT(ctx.executor, "SolverContext::executor must be set (PhysicsWorld resolves a serial default)");
             PhysicsWorld& w = *ctx.world;
 
             // Phase C, Task 2: the body-state scratch is now DENSE, sized by the
@@ -947,14 +947,14 @@ namespace Manifold2D
                     {
                         const ContactConstraint& cc = ctx.contacts[ref];
                         const std::uint32_t ia = w.AwakeIndexOf(cc.bodyA);
-                        assert(ia < awakeCount && seen[ia] == 0u &&
-                               "within-color clash: awake-dynamic A twice in one color");
+                        MOSAIC_ASSERT(ia < awakeCount && seen[ia] == 0u,
+                                      "within-color clash: awake-dynamic A twice in one color");
                         seen[ia] = 1u;
                         if (cc.bodyBIsBody && cc.invMassB > Real(0))
                         {
                             const std::uint32_t ib = w.AwakeIndexOf(cc.bodyB);
-                            assert(ib < awakeCount && seen[ib] == 0u &&
-                                   "within-color clash: awake-dynamic B twice in one color");
+                            MOSAIC_ASSERT(ib < awakeCount && seen[ib] == 0u,
+                                          "within-color clash: awake-dynamic B twice in one color");
                             seen[ib] = 1u;
                         }
                     }

@@ -12,7 +12,7 @@
 #include <Manifold2D/Physics/PhysicsWorld.hpp>
 
 #include <algorithm>
-#include <cassert>
+#include <Mosaic/Assert.hpp>
 #include <cmath>
 
 #include <Manifold2D/Physics/Body.hpp>
@@ -924,9 +924,9 @@ namespace Manifold2D
                 // A dynamic AABB must be fixedRotation: an axis-aligned box has
                 // no meaningful orientation in this fixed-rotation engine
                 // (ports the Lua assert, PhysicsWorld.lua:238).
-                assert((def.shape.kind != ShapeKind::Aabb || def.fixedRotation) &&
-                       "dynamic AABB shapes must be fixedRotation "
-                       "(axis-aligned by definition)");
+                MOSAIC_ASSERT((def.shape.kind != ShapeKind::Aabb || def.fixedRotation),
+                              "dynamic AABB shapes must be fixedRotation "
+                              "(axis-aligned by definition)");
 
                 // Mass + rotational inertia from Shape::ComputeMass(density)
                 // (the P1.1 MassData -- verified equivalent to the Lua massProps,
@@ -1110,8 +1110,8 @@ namespace Manifold2D
             // bit would mis-color a future body recycled into this slot). Debug-only;
             // the recycle path also defaults the mask to 0 in EnsureCapacity, so a
             // leak here is a real bug, not a benign stale value.
-            assert(m_graph.DebugBodyMaskClear(idx) &&
-                   "RemoveBody: body left a non-zero color mask -- a Destroy site is missing ReleaseContactColor");
+            MOSAIC_ASSERT(m_graph.DebugBodyMaskClear(idx),
+                          "RemoveBody: body left a non-zero color mask -- a Destroy site is missing ReleaseContactColor");
 
             // Phase B: remove from the awake-set while the slot is still typed
             // Dynamic (btype has not been touched yet; RemoveFromAwakeSet checks
@@ -1883,8 +1883,8 @@ namespace Manifold2D
                 // INVARIANT: bullets are always movers (Kinematic or Dynamic);
                 // a Static body is never flagged isBullet so this branch is
                 // unreachable for statics.
-                assert(static_cast<BodyType>(m_btype[i]) != BodyType::Static &&
-                       "bullets are never static");
+                MOSAIC_ASSERT(static_cast<BodyType>(m_btype[i]) != BodyType::Static,
+                              "bullets are never static");
 
                 // STATICS ONLY: default ShapeCastOpts (movers = false) casts vs
                 // tile spans + non-sensor static bodies. The bullet body is a

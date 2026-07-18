@@ -22,7 +22,7 @@
 // SDL3/NVRHI/Batcher2D/ImGui. Compiles both /MD (Arcane.dll) and static-CRT
 // (Arcane-only, /MD).
 
-#include <cassert>
+#include <Mosaic/Assert.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <unordered_map>
@@ -151,12 +151,12 @@ namespace Manifold2D
 
             Contact& Get(std::uint32_t id)
             {
-                assert(id < m_pool.size() && m_alive[id] && "ContactPool::Get on a dead/invalid id");
+                MOSAIC_ASSERT(id < m_pool.size() && m_alive[id], "ContactPool::Get on a dead/invalid id");
                 return m_pool[id];
             }
             const Contact& Get(std::uint32_t id) const
             {
-                assert(id < m_pool.size() && m_alive[id] && "ContactPool::Get on a dead/invalid id");
+                MOSAIC_ASSERT(id < m_pool.size() && m_alive[id], "ContactPool::Get on a dead/invalid id");
                 return m_pool[id];
             }
             std::size_t Count() const { return m_live; }
