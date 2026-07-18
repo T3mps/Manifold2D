@@ -1,3 +1,10 @@
+// MOSAIC_LOG_CATEGORY must be defined before the FIRST include of Mosaic/Log.hpp
+// in this TU, so it leads ahead of this TU's own header (defensive: no current
+// transitive Mosaic pull from SpatialGrid.hpp, but this keeps the convention
+// uniform with the TUs where one exists).
+#define MOSAIC_LOG_CATEGORY "Manifold2D.Broadphase"
+#include <Mosaic/Log.hpp>
+
 #include <Manifold2D/Physics/Broadphase/SpatialGrid.hpp>
 #include <algorithm>
 #include <cmath>
@@ -67,7 +74,12 @@ bool SpatialGrid::SaneBox(const Aabb2& b) const
 
 void SpatialGrid::Insert(std::uint32_t id, const Aabb2& box)
 {
-    if (!SaneBox(box)) { Remove(id); return; } // drop garbage; don't register
+    if (!SaneBox(box))
+    {
+        MOSAIC_LOG_WARN("non-finite AABB dropped from broadphase");
+        Remove(id); // drop garbage; don't register
+        return;
+    }
     Remove(id); // self-heal: drop any prior registration so re-Insert is safe
                 // (idempotent; Remove is a no-op for a fresh id).
     int x0, y0, x1, y1; CellRange(box, x0, y0, x1, y1);

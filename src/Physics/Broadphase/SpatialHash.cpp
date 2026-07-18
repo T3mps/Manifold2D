@@ -7,6 +7,13 @@
 //
 // PRESENTATION-FREE + C++20-clean: Geometry::Vec2 + std + sibling Physics headers only.
 
+// MOSAIC_LOG_CATEGORY must be defined before the FIRST include of Mosaic/Log.hpp
+// in this TU, so it leads ahead of this TU's own header (defensive: no current
+// transitive Mosaic pull from SpatialHash.hpp, but this keeps the convention
+// uniform with the TUs where one exists).
+#define MOSAIC_LOG_CATEGORY "Manifold2D.Broadphase"
+#include <Mosaic/Log.hpp>
+
 #include <Manifold2D/Physics/Broadphase/SpatialHash.hpp>
 
 #include <algorithm>
@@ -109,7 +116,12 @@ namespace Manifold2D
             // Remove clears any prior registration so a body that escapes to
             // garbage coords is de-registered rather than left stale. Mirrors
             // SpatialGrid::Insert's guard.
-            if (!SaneBox(box)) { Remove(id); return; }
+            if (!SaneBox(box))
+            {
+                MOSAIC_LOG_WARN("non-finite AABB dropped from broadphase");
+                Remove(id);
+                return;
+            }
 
             const CellRange nr{ CellOf(box.min.x), CellOf(box.min.y),
                                 CellOf(box.max.x), CellOf(box.max.y) };

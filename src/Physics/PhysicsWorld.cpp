@@ -9,6 +9,13 @@
 //
 // PRESENTATION-FREE + C++20-clean: Geometry::Vec2 + std + sibling Physics headers only.
 
+// MOSAIC_LOG_CATEGORY must be defined before the FIRST transitive include of
+// Mosaic/Log.hpp in this TU -- PhysicsWorld.hpp itself pulls it in (via
+// Contact.hpp -> Mosaic/Assert.hpp -> Mosaic/Log.hpp), so this has to lead,
+// ahead of even this TU's own header.
+#define MOSAIC_LOG_CATEGORY "Manifold2D.World"
+#include <Mosaic/Log.hpp>
+
 #include <Manifold2D/Physics/PhysicsWorld.hpp>
 
 #include <algorithm>
@@ -68,6 +75,43 @@ namespace Manifold2D
                 }
             }
 
+            // Step 4 (Task B2): reject a degenerate collider (zero or
+            // non-finite extent) at the AddFixture boundary. A zero-extent
+            // shape silently registers a zero-area hitbox (finite, so no
+            // downstream assert -- just a fixture that can never collide); a
+            // non-finite one (e.g. NaN radius) produces a non-finite AABB that
+            // trips DynamicTree::Update's finite-AABB assert. Both are input
+            // errors, not simulation states, so they belong at the boundary,
+            // not left to propagate.
+            bool IsDegenerateShape(const Shape& s) noexcept
+            {
+                switch (s.kind)
+                {
+                    case ShapeKind::Circle:
+                        return !std::isfinite(s.radius) || s.radius <= Real(0);
+                    case ShapeKind::Capsule:
+                        return !std::isfinite(s.radius) || s.radius <= Real(0) ||
+                               !std::isfinite(s.halfLen) || s.halfLen < Real(0);
+                    case ShapeKind::Aabb:
+                        return !std::isfinite(s.halfW) || !std::isfinite(s.halfH) ||
+                               s.halfW <= Real(0) || s.halfH <= Real(0);
+                    case ShapeKind::Polygon:
+                        if (s.verts.size() < 3)
+                        {
+                            return true;
+                        }
+                        for (const Vec2& v : s.verts)
+                        {
+                            if (!std::isfinite(v.x) || !std::isfinite(v.y))
+                            {
+                                return true;
+                            }
+                        }
+                        return false;
+                }
+                return true; // unreachable; defensive
+            }
+
             std::unique_ptr<ISolver> MakeSolver(const WorldDef& def)
             {
                 // SoftStep is THE solver -- the P2.2 TGS Soft (Box2D-v3) impl.
@@ -104,6 +148,13 @@ namespace Manifold2D
             // Phase C, Task 4: the per-color contact-id lists are sized once in the
             // ConstraintGraph ctor (decomp step 2); the per-body color mask grows
             // lazily with the body SoA via m_graph.Grow in EnsureCapacity.
+
+            // One-line world-config banner (the only INFO site in this TU --
+            // everything else stays at WARN/DEBUG/TRACE or silent). Plain
+            // literal: Mosaic's message seam is std::string_view with no
+            // formatting layer, so a config-value banner is intentionally NOT
+            // composed here.
+            MOSAIC_LOG_INFO("PhysicsWorld created: SoftStep solver, MKS units");
         }
 
         PhysicsWorld::~PhysicsWorld() = default;
@@ -114,6 +165,7 @@ namespace Manifold2D
             {
                 return;
             }
+            MOSAIC_LOG_DEBUG("storage grew");
             // Amortized growth: at least double the current capacity so that
             // a one-at-a-time fill (AddBody(count+1)) does not realloc all ~12
             // SoA vectors on every add.  Free-list / steady-state behaviour is
@@ -177,6 +229,7 @@ namespace Manifold2D
             {
                 return;
             }
+            MOSAIC_LOG_DEBUG("storage grew");
             // Amortised growth: at least double the current capacity.
             const std::uint32_t next =
                 std::max(n, static_cast<std::uint32_t>(
@@ -202,6 +255,7 @@ namespace Manifold2D
             {
                 return;
             }
+            MOSAIC_LOG_DEBUG("storage grew");
             // Grow to match body SoA capacity.
             const std::uint32_t next =
                 std::max(n, static_cast<std::uint32_t>(
@@ -443,6 +497,11 @@ namespace Manifold2D
             {
                 return kInvalidFixture;
             }
+            if (IsDegenerateShape(def.shape))
+            {
+                MOSAIC_LOG_WARN("rejected degenerate AddFixture shape");
+                return kInvalidFixture;
+            }
             const std::uint32_t bodySlot = bh.index;
 
             const std::uint32_t fi = AllocFixtureSlot(bodySlot, def);
@@ -460,6 +519,7 @@ namespace Manifold2D
             // (Phase 2, Task 1). AddFixtureProxy skips Static bodies.
             AddFixtureProxy(fi);
 
+            MOSAIC_LOG_TRACE("fixture added");
             return FixtureHandle{ fi, m_fxGen[fi] };
         }
 
@@ -467,8 +527,10 @@ namespace Manifold2D
         {
             if (!IsValid(fh))
             {
+                MOSAIC_LOG_WARN("operation on a stale/invalid FixtureHandle ignored");
                 return;
             }
+            MOSAIC_LOG_TRACE("fixture removed");
             const std::uint32_t fi       = fh.index;
             const std::uint32_t bodySlot = m_fxBody[fi];
 
@@ -837,6 +899,19 @@ namespace Manifold2D
 
         BodyHandle PhysicsWorld::AddBody(const BodyDef& def)
         {
+            // Reject a non-finite position before it consumes a slot: it would
+            // otherwise flow into SlotAabb/broadphase Update unchecked, which
+            // either poisons the tree with a garbage finite-but-huge AABB (a
+            // NaN position -- min/max accumulation silently drops NaN because
+            // every NaN comparison is false) or trips DynamicTree::Update's
+            // finite-AABB assert outright (an Inf position produces a genuinely
+            // infinite AABB component). No slot is consumed either way.
+            if (!std::isfinite(def.position.x) || !std::isfinite(def.position.y))
+            {
+                MOSAIC_LOG_WARN("rejected non-finite AddBody position");
+                return kInvalidBody;
+            }
+
             // Reuse a free slot or append (ports addBody's free-list pop).
             std::uint32_t idx;
             if (!m_free.empty())
@@ -1059,6 +1134,7 @@ namespace Manifold2D
             // (Box2D sim->maxExtent). A later AddFixture re-runs this via RecomputeBodyMass.
             RecomputeMaxExtent(idx);
 
+            MOSAIC_LOG_TRACE("body added");
             return BodyHandle{ idx, m_gen[idx] };
         }
 
@@ -1066,8 +1142,10 @@ namespace Manifold2D
         {
             if (!IsValid(h))
             {
+                MOSAIC_LOG_WARN("operation on a stale/invalid BodyHandle ignored");
                 return;
             }
+            MOSAIC_LOG_TRACE("body removed");
             const std::uint32_t idx = h.index;
             m_alive[idx] = 0;
             m_gen[idx] += 1u; // invalidates the handle (stale-handle invariant)
@@ -1204,6 +1282,7 @@ namespace Manifold2D
             }
             Joint* raw = j.get();
             m_joints.push_back(std::move(j));
+            MOSAIC_LOG_TRACE("joint added");
 
             // Wake the jointed bodies so a sleeping captive rejoins the solve
             // (ports addJoint's def.a:wake() / def.b:wake()).
@@ -1262,6 +1341,7 @@ namespace Manifold2D
                         MarkSplitCandidate(IslandOf(ha.index));
                     }
                     m_joints.erase(m_joints.begin() + static_cast<std::ptrdiff_t>(i));
+                    MOSAIC_LOG_TRACE("joint removed");
                     return;
                 }
             }
@@ -1289,6 +1369,12 @@ namespace Manifold2D
         {
             if (!IsValid(h))
             {
+                MOSAIC_LOG_WARN("operation on a stale/invalid BodyHandle ignored");
+                return;
+            }
+            if (!std::isfinite(p.x) || !std::isfinite(p.y))
+            {
+                MOSAIC_LOG_WARN("rejected non-finite SetPosition");
                 return;
             }
             const std::uint32_t i = h.index;
@@ -1307,6 +1393,7 @@ namespace Manifold2D
         {
             if (!IsValid(h))
             {
+                MOSAIC_LOG_WARN("operation on a stale/invalid BodyHandle ignored");
                 return;
             }
             const std::uint32_t i = h.index;
@@ -1343,6 +1430,12 @@ namespace Manifold2D
         {
             if (!IsValid(h))
             {
+                MOSAIC_LOG_WARN("operation on a stale/invalid BodyHandle ignored");
+                return;
+            }
+            if (!std::isfinite(v.x) || !std::isfinite(v.y))
+            {
+                MOSAIC_LOG_WARN("rejected non-finite SetVelocity");
                 return;
             }
             const std::uint32_t i = h.index;
@@ -1368,6 +1461,7 @@ namespace Manifold2D
         {
             if (!IsValid(h))
             {
+                MOSAIC_LOG_WARN("operation on a stale/invalid BodyHandle ignored");
                 return;
             }
             const std::uint32_t i = h.index;
@@ -1391,6 +1485,7 @@ namespace Manifold2D
         {
             if (!IsValid(h))
             {
+                MOSAIC_LOG_WARN("operation on a stale/invalid BodyHandle ignored");
                 return;
             }
             const std::uint32_t i = h.index;
@@ -1411,6 +1506,7 @@ namespace Manifold2D
         {
             if (!IsValid(h))
             {
+                MOSAIC_LOG_WARN("operation on a stale/invalid BodyHandle ignored");
                 return;
             }
             const std::uint32_t i = h.index;
@@ -1444,6 +1540,7 @@ namespace Manifold2D
         {
             if (!IsValid(h))
             {
+                MOSAIC_LOG_WARN("operation on a stale/invalid BodyHandle ignored");
                 return;
             }
             const std::uint32_t i = h.index;
@@ -1481,6 +1578,7 @@ namespace Manifold2D
         {
             if (!IsValid(h))
             {
+                MOSAIC_LOG_WARN("operation on a stale/invalid BodyHandle ignored");
                 return;
             }
             const std::uint32_t i = h.index;
@@ -1538,6 +1636,7 @@ namespace Manifold2D
         {
             if (!IsValid(h))
             {
+                MOSAIC_LOG_WARN("operation on a stale/invalid BodyHandle ignored");
                 return;
             }
             const std::uint32_t i = h.index;

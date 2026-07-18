@@ -1,3 +1,10 @@
+// MOSAIC_LOG_CATEGORY must be defined before the FIRST transitive include of
+// Mosaic/Log.hpp in this TU -- ConstraintGraph.hpp itself pulls it in (via
+// Contact.hpp -> Mosaic/Assert.hpp -> Mosaic/Log.hpp), so this has to lead,
+// ahead of even this TU's own header.
+#define MOSAIC_LOG_CATEGORY "Manifold2D.Graph"
+#include <Mosaic/Log.hpp>
+
 #include <Manifold2D/Physics/ConstraintGraph.hpp>
 
 #include <algorithm>
@@ -210,6 +217,7 @@ namespace Manifold2D
             // Phase C, Task 4: per-body color-occupancy bitmask. A fresh/recycled
             // slot starts with NO colors occupied (the RemoveBody leak-detector
             // asserts a removed body left mask 0, so a recycled slot is always 0).
+            MOSAIC_LOG_DEBUG("storage grew");
             m_bodyColorMask.resize(next, 0u);
         }
 
