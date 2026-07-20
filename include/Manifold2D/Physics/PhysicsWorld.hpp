@@ -379,6 +379,17 @@ namespace Manifold2D
             //   bodyAngle + fixture.localAngle
             [[nodiscard]] Real GetFixtureWorldAngle(FixtureHandle fh) const noexcept;
 
+            // Fixture geometry accessors (read-only). Unlike the per-body single
+            // ShapeSlot()/m_shape (captured once at AddBody), these read the LIVE
+            // per-fixture data -- so a fixture rebuilt at a new scale
+            // (AddFixture + DropFixture) is reflected. Return a benign default
+            // (empty shape / zero) for a stale or out-of-range handle. Used by the
+            // debug-draw overlay to outline each fixture at its true scaled shape
+            // and local pose.
+            [[nodiscard]] const Shape& GetFixtureShape(FixtureHandle fh) const noexcept;
+            [[nodiscard]] Vec2 GetFixtureLocalPos(FixtureHandle fh) const noexcept;
+            [[nodiscard]] Real GetFixtureLocalAngle(FixtureHandle fh) const noexcept;
+
             // Collision filter accessors (read-only; needed by tests and future
             // filter-query systems). Return the default (1 / 0xFFFFFFFF) for a
             // stale or out-of-range handle.

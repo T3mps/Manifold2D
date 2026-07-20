@@ -128,3 +128,53 @@ TEST_CASE("DebugCollide reproduces the manifold + records a trace", "[physics][d
         REQUIRE(chosen == 1);
     }
 }
+
+// GetFixtureShape / GetFixtureLocalPos / GetFixtureLocalAngle read the LIVE
+// per-fixture data, so a fixture added at a new scale (the paused
+// scale-reconcile pattern: AddFixture + DropFixture) is reflected -- unlike the
+// single per-body m_shape/ShapeSlot captured once at AddBody. These back the
+// debug-draw per-fixture outline (each fixture drawn at its true scaled shape +
+// local pose). Values are exact (all set from exactly-representable literals).
+TEST_CASE("Fixture geometry accessors read live per-fixture shape + local pose",
+          "[physics][debugviz]")
+{
+    WorldDef wd;
+    wd.gravityX = Real(0);
+    wd.gravityY = Real(0);
+    PhysicsWorld w(wd);
+
+    BodyDef d;
+    d.type     = BodyType::Kinematic; // a box body that may carry an angle
+    d.position = Vec2(Real(0), Real(0));
+    d.shape    = MakeAabb(Real(0.5), Real(0.5)); // authored (create-scale) box
+    const BodyHandle h = w.AddBody(d);
+
+    // Primary (back-compat) fixture: shape == the AddBody shape, local pose zero.
+    const FixtureHandle f0 = w.GetBodyFixture(h, 0);
+    REQUIRE(w.IsValid(f0));
+    const Shape& s0 = w.GetFixtureShape(f0);
+    REQUIRE(s0.kind == ShapeKind::Aabb);
+    CHECK(s0.halfW == Real(0.5));
+    CHECK(s0.halfH == Real(0.5));
+    CHECK(w.GetFixtureLocalPos(f0).x == Real(0));
+    CHECK(w.GetFixtureLocalPos(f0).y == Real(0));
+    CHECK(w.GetFixtureLocalAngle(f0) == Real(0));
+
+    // A second fixture at 4x with a local offset + angle: the accessors read the
+    // LIVE per-fixture data (the SCALED shape at 2.0), not the body's create-time
+    // m_shape (still 0.5).
+    FixtureDef fd;
+    fd.shape      = MakeAabb(Real(2.0), Real(2.0));
+    fd.localPos   = Vec2(Real(1.0), Real(-0.5));
+    fd.localAngle = Real(0.25);
+    fd.density    = Real(1);
+    const FixtureHandle f1 = w.AddFixture(h, fd);
+    REQUIRE(w.IsValid(f1));
+    const Shape& s1 = w.GetFixtureShape(f1);
+    REQUIRE(s1.kind == ShapeKind::Aabb);
+    CHECK(s1.halfW == Real(2.0));
+    CHECK(s1.halfH == Real(2.0));
+    CHECK(w.GetFixtureLocalPos(f1).x == Real(1.0));
+    CHECK(w.GetFixtureLocalPos(f1).y == Real(-0.5));
+    CHECK(w.GetFixtureLocalAngle(f1) == Real(0.25));
+}

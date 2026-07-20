@@ -632,6 +632,38 @@ namespace Manifold2D
             return m_angle[bodySlot] + m_fxLocalAngle[fi];
         }
 
+        const Shape& PhysicsWorld::GetFixtureShape(FixtureHandle fh) const noexcept
+        {
+            // Function-local empty shape for stale/out-of-range handles: a
+            // reference return has to name something, and a default Shape has
+            // empty verts (the outline draws nothing for it).
+            static const Shape kEmpty{};
+            if (!IsValid(fh))
+            {
+                return kEmpty;
+            }
+            return m_fxShape[fh.index];
+        }
+
+        Vec2 PhysicsWorld::GetFixtureLocalPos(FixtureHandle fh) const noexcept
+        {
+            if (!IsValid(fh))
+            {
+                return Vec2(Real(0), Real(0));
+            }
+            const std::uint32_t fi = fh.index;
+            return Vec2(m_fxLocalPosX[fi], m_fxLocalPosY[fi]);
+        }
+
+        Real PhysicsWorld::GetFixtureLocalAngle(FixtureHandle fh) const noexcept
+        {
+            if (!IsValid(fh))
+            {
+                return Real(0);
+            }
+            return m_fxLocalAngle[fh.index];
+        }
+
         std::uint32_t PhysicsWorld::GetFixtureCategory(FixtureHandle fh) const noexcept
         {
             if (!IsValid(fh))
