@@ -1,23 +1,37 @@
-# Vendor the standalone Manifold2D into a consumer repo (e.g. Aphelyon) as a
-# faithful source mirror, like ThirdParty/Astra (which carries its own tests/).
-# Excludes .git/.github, build outputs, the standalone test-dep vendor/ tree
-# (the consumer supplies its own Catch2/rapidcheck), and ThirdParty/ (the
-# consumer supplies its own Mosaic at ThirdParty/Mosaic -- one canonical copy
-# per consumer, not a nested mirror). The vendored premake5.lua is a standalone
-# workspace and is INERT in the consumer -- the consumer builds Manifold2D via
-# its own inline project (see Arcane's premake), pointing at the consumer's
-# ThirdParty/Mosaic/include for the shared Mosaic seams.
+# Vendor the standalone Manifold2D into a consumer repo as a SOURCE-ONLY
+# mirror: include/ + src/ + LICENSE. Nothing else -- the consumer owns its
+# ThirdParty/Manifold2D/premake5.lua (a project-only wrapper, e.g. Arcane's
+# enkiTS-style static-lib project), its own Mosaic at ThirdParty/Mosaic, and
+# its own test deps. The pre-2026-08 /MIR full-tree sync is retired: it
+# mirrored the standalone workspace premake5.lua + scripts/ over the
+# consumer's wrapper, which the 2026-07-20 wrapper decision forbids.
 #
-# Usage: .\scripts\vendor.ps1 [-Aphelyon <path-to-consumer-repo-root>]
-param([string]$Aphelyon = "D:\dev\starworks\Gacha")
+# Usage: .\scripts\vendor.ps1 [-Consumer <path-to-consumer-repo-root>]
+param([string]$Consumer = "D:\dev\starworks\Arcane")
 $ErrorActionPreference = "Stop"
-$src = "D:\dev\starworks\Manifold2D"
-$dst = "$Aphelyon\ThirdParty\Manifold2D"
+$src = Split-Path -Parent $PSScriptRoot   # scripts/ -> standalone repo root
+$dst = "$Consumer\ThirdParty\Manifold2D"
 
-robocopy $src $dst /MIR /NFL /NDL /NJH `
-    /XD .git .github bin bin-int ide ide-md .vs vendor ThirdParty `
-    /XF *.user *.slnx *.sln
+if (-not (Test-Path "$src\include\Manifold2D")) {
+    throw "Standalone Manifold2D not found at '$src' (no include\Manifold2D)."
+}
+if (-not (Test-Path "$dst\premake5.lua")) {
+    throw "Consumer wrapper not found at '$dst\premake5.lua' -- refusing to vendor into a directory that lacks the consumer's own premake wrapper."
+}
 
-if ($LASTEXITCODE -ge 8) { Write-Error "robocopy failed ($LASTEXITCODE)"; exit 1 }
-Write-Host "Vendored $src -> $dst"
+# Source dirs mirror WITH orphan deletion (a header removed upstream must
+# disappear downstream too); everything outside include/ + src/ is untouched.
+robocopy "$src\include" "$dst\include" /MIR /NFL /NDL /NJH
+if ($LASTEXITCODE -ge 8) { Write-Error "robocopy include failed ($LASTEXITCODE)"; exit 1 }
+robocopy "$src\src" "$dst\src" /MIR /NFL /NDL /NJH
+if ($LASTEXITCODE -ge 8) { Write-Error "robocopy src failed ($LASTEXITCODE)"; exit 1 }
+Copy-Item "$src\LICENSE" "$dst\LICENSE" -Force
+
+# Provenance stamp (anti-drift, same mechanism as the Astra sync).
+$commit = (git -C $src rev-parse HEAD 2>$null)
+if (-not $commit) { $commit = "(source not a git checkout)" }
+"Vendored from github.com/T3mps/Manifold2D @ $commit on $(Get-Date -Format s) -- include/ + src/ + LICENSE only; the premake5.lua here is the CONSUMER's wrapper, never synced." |
+    Out-File -Encoding ascii "$dst\VENDORED.txt"
+
+Write-Host "Vendored $src {include,src,LICENSE} -> $dst (wrapper premake untouched)"
 exit 0

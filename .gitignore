@@ -21,3 +21,6 @@ Makefile
 .idea/
 .DS_Store
 Thumbs.db
+
+# Reference-only local dumps (parity citation sources, e.g. box2d) -- untracked
+.reference/
