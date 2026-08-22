@@ -155,6 +155,110 @@ call, not a geometry one.
 
 ---
 
+## Which default, for a game physics engine
+
+The 3D world has a settled answer and it is instructive. **V-HACD** (Volumetric
+Hierarchical Approximate Convex Decomposition) is the de-facto standard, shipped
+in Bullet, PhysX, Unreal, Unity, Blender, Houdini and Omniverse — fast (seconds
+per asset) and deterministic given parameters. Parry ships
+`parry2d::transformation::vhacd`, so the approach has a real 2D form.
+
+But the documented complaint about it is the thing that decides our default:
+**V-HACD emits more hulls, so the time saved at decomposition is lost again at
+simulation runtime, because a higher hull count slows contact resolution.**
+CoACD's stated advantage over it is a lower hull count — fewer contact pairs for
+the solver to evaluate per step.
+
+**That tradeoff resolves cleanly for us, and it inverts the usual intuition.**
+Collider decomposition happens **once, at author time** — in the editor when the
+user commits a polygon, or at import. The **piece count is then paid every frame
+for the life of the game**: more pieces means more broadphase entries, more
+contact pairs, more constraint rows, more solver work, forever.
+
+So the objective function is **minimise piece count subject to an acceptable
+concavity tolerance** — *not* minimise decomposition time. We can afford an
+expensive author-time algorithm, because it buys runtime cost back on every
+frame of every play session.
+
+That has three consequences for the policy set:
+
+1. **Bayazit optimises the wrong variable for us.** It is fast and non-optimal,
+   which is the right trade for a runtime decomposer and the wrong one for an
+   author-time one. It stays in the set — but as the *fast* policy, not the
+   default.
+2. **The optimal DP (Keil–Snoeyink) is more attractive here than its complexity
+   suggests.** O(n³) on a hand-authored collider of 8–40 points is nothing at
+   author time, and it minimises exactly the quantity that costs at runtime.
+3. **The editor wants two policies at once**, which is itself an argument for the
+   policy abstraction rather than a single default: a **fast** one for live
+   feedback while the user is dragging a point, and the **good** one on commit.
+   That is a real product requirement, not a hypothetical.
+
+**Recommended default:** an approximate policy with an explicit concavity
+tolerance and hull-count as its objective, with the optimal DP available for
+small inputs and Bayazit as the live-preview path. The tolerance is the knob that
+matters, because for a *collider* a piece boundary a few millimetres off the
+authored outline is invisible while a doubled hull count is not.
+
+---
+
+## The convention, across the board
+
+The library currently has **two different conventions for the same idea**, and
+naming which applies where is a prerequisite for adding a third instance.
+
+**A — compile-time policy tags** (`Geometry::ConvexHull`). Six stateless tags,
+`Policy::template Build<T>`, wrapper owns the shared contract, zero indirection.
+**No default in the signature.**
+
+**B — runtime strategy interface** (`Physics::Broadphase`). `IBroadphase` is an
+abstract base; the world holds an `IBroadphase*`; five strategies
+(`DynamicTree`, `SpatialGrid`, `SpatialHash`, `SweepAndPrune`, `TileGrid`) sit
+behind a `{ Tree = 0, ... }` enum. **`DynamicTree` is the documented default**,
+chosen deliberately over the Lua original's SpatialHash.
+
+Convention B is, on every axis except dispatch, the *better* worked example: it
+has the complete set, an argued default, a shared contract stated in the header
+(*"ALL THREE strategies emit the IDENTICAL set"* — same equivalence promise
+`ConvexHull` makes), and a cross-strategy invariance test
+(`PhysicsBroadphaseTest`, plus the broadphase-strategy-invariance case in
+`PhysicsInvariantsTest`).
+
+**These are not the same problem, and the difference is the dispatch rule:**
+
+| | Compile-time policy (A) | Runtime interface (B) |
+|---|---|---|
+| Shape | Stateless pure function | Stateful, long-lived object |
+| Chosen by | The call site, statically | Configuration, per World |
+| Call frequency | Per invocation | Once per Step, amortised over thousands of pairs |
+| Cost of indirection | Would be real | Negligible |
+| Examples | `ConvexHull`, `Triangulate`, `ConvexDecompose` | `Broadphase` |
+
+So: **stateless pure geometry → compile-time policy. Stateful strategy selected
+per-World → runtime interface.** Both, however, owe the same four things, and
+that is what "the convention" should actually mean:
+
+1. the complete set of needed algorithms implemented;
+2. a **documented default chosen for our use case**, with the reasoning recorded;
+3. a **shared contract owned by the wrapper**, not re-implemented per algorithm;
+4. a **cross-policy test** — equivalence where the answer is unique, validity
+   invariants where it is not.
+
+Measured against that, the gaps today are: `ConvexHull` has (1), (3), (4) but
+**not (2)** — `template <class Policy, class T = float>` has no default.
+Broadphase has all four. Triangulation and decomposition have none of them
+because they do not exist. Narrowphase is worth a look separately — `Epa` and
+`Mpr` are genuinely interchangeable for penetration depth and are not behind a
+policy, while `NarrowphaseKind` turns out to be a pure display tag that
+*"NOTHING in the Step path reads"*, so it is not dispatch at all.
+
+**An across-the-board pass deserves its own spec.** The decomposition work below
+should be built to the convention rather than waiting on it, but the audit —
+naming the rule, giving `ConvexHull` its default, and deciding whether
+Epa/Mpr become a policy pair — is a separate, bounded piece of work.
+
+---
+
 ## The sequencing question: triangulation first?
 
 Hertel–Mehlhorn needs a triangulation, and **triangulation is itself a "needed
