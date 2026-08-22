@@ -11,6 +11,24 @@ itself and then consumed by arcane."*
 
 ---
 
+## Scope: this is 2D, and stays 2D
+
+Manifold2D is the 2D physics + geometry library and does not become 3D. Arcane's
+renderer is going 3D (the F1–F5 foundations arc), but **physics remains 2D,
+operating on the XY plane and the Z-axis rotation of the 3D transform** — a
+decision locked during F1.
+
+**3D physics is a separate arc: vendor Box3D** (MIT, C17, Rubikon + Box2D
+heritage), after the transform spine lands. Manifold3D is explicitly far away.
+When 3D physics arrives, *3D* collider authoring is a different problem —
+primitives, 3D convex hulls, and mesh decomposition — and nothing in this
+document addresses it.
+
+The 3D literature is cited below only as **evidence about the hull-count /
+runtime tradeoff**, which transfers across dimension. The scope does not.
+
+---
+
 ## One correction to the framing
 
 Decomposition is for **concave** polygons. A convex polygon is already a single
