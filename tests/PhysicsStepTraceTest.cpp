@@ -311,3 +311,74 @@ TEST_CASE("PhysicsStepTrace: a resting stack's Relax never exceeds its Solve",
         CHECK(MaxNormalVel(relax) <= MaxNormalVel(solve));
     }
 }
+
+// ---------------------------------------------------------------------------
+// (5) The write-back is load-bearing: a contact's normalImpulse is the
+// ACCUMULATED value as of each stop, not the previous step's warm-start seed
+// frozen in place for the whole traced step.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("PhysicsStepTrace: contacts carry the accumulated impulse, not the prepare-time warm-start seed",
+          "[physics][trace]")
+{
+    // A STILL-SETTLING stack, not the fully-converged rest state case (4)
+    // traces: a few steps in, the previous step's warm-start impulse has not
+    // yet converged onto the exact value gravity needs, so THIS step's Solve
+    // keeps correcting it substep to substep -- the delta this case looks for
+    // is guaranteed real. A perfectly warm-started equilibrium is the wrong
+    // scene to pick: once WarmStart alone reproduces the exact resting
+    // impulse, Solve's bias correction can land on exactly zero every
+    // substep, which would make this detector flaky (or vacuously pass on a
+    // frozen value, since "no change from a warm start" and "no change
+    // because the copy-out is missing" would look identical).
+    WorldDef wd;
+    wd.sleepThreshold = Real(0);
+    PhysicsWorld w(wd);
+    const std::vector<BodyHandle> boxes = BuildStack(w, 4);
+    for (int k = 0; k < 30; ++k) { w.Step(kStep); }   // landed, still settling
+    for (const BodyHandle h : boxes) { REQUIRE(w.IsAwake(h)); }
+
+    StepTrace trace;
+    w.StepTraced(kStep, trace);
+    REQUIRE(trace.snapshots.size() == 22u);
+
+    const StepTraceSnapshot& solve0 = trace.snapshots[2];    // substep 0 Solve
+    const StepTraceSnapshot& solve3 = trace.snapshots[17];   // substep 3 Solve
+    REQUIRE(solve0.stage   == StageType::Solve);
+    REQUIRE(solve3.stage   == StageType::Solve);
+    REQUIRE(solve0.substep == 0u);
+    REQUIRE(solve3.substep == 3u);
+    // m_contactConstraints is built once per step (stage 2) and never
+    // touched again until the next step, so contacts[i] names the SAME
+    // constraint (same bodies, same fixtures, same manifold point) in both
+    // snapshots of this one traced step -- no matching by id needed.
+    REQUIRE(solve0.contacts.size() == solve3.contacts.size());
+    REQUIRE(solve0.contacts.size() > 0u);
+
+    // (a) the write-back produced a real non-zero impulse somewhere -- a
+    // sentinel against a copy-out that silently zeroes everything instead of
+    // forwarding the lane values.
+    bool anyNonZero = false;
+    for (const StepTraceContact& c : solve3.contacts)
+    {
+        if (c.normalImpulse > Real(0)) { anyNonZero = true; break; }
+    }
+    CHECK(anyNonZero);
+
+    // (b) at least one contact's normalImpulse CHANGED between the two Solve
+    // snapshots of this SAME step. Without the lane->constraint copy-out this
+    // task adds, every colored constraint's normalImpulse stays pinned at the
+    // Prepare-time warm-start seed (ConstraintGraph.cpp:1178) for the whole
+    // traced step, so every pair below would compare equal and this CHECK
+    // would fail -- exactly the regression this case exists to catch.
+    bool anyChanged = false;
+    for (std::size_t i = 0; i < solve0.contacts.size(); ++i)
+    {
+        if (solve0.contacts[i].normalImpulse != solve3.contacts[i].normalImpulse)
+        {
+            anyChanged = true;
+            break;
+        }
+    }
+    CHECK(anyChanged);
+}
