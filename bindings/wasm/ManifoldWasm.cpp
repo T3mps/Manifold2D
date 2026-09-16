@@ -16,6 +16,7 @@
 //
 // Units are MKS, +Y is DOWN (the engine's default gravity is (0, 10)).
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <memory>
@@ -91,6 +92,7 @@ public:
         wd.gravityX     = Real(0);
         wd.gravityY     = static_cast<Real>(gravityY);
         wd.substepCount = static_cast<std::uint32_t>(substeps < 1 ? 1 : substeps);
+        m_def   = wd;   // reported back by params(): the world was built from exactly this
         m_world = std::make_unique<PhysicsWorld>(wd);
         // The world's own SerialWorkScheduler: no threads, the deterministic
         // reference path, and the only option under -sENVIRONMENT=web without
@@ -137,9 +139,48 @@ public:
 
         m_hex      = bh;
         m_hexAngle = Real(0);
-        m_hexOmega = Real(0);
         m_world->SetAngle(m_hex, m_hexAngle);
+        // A spin set before the hexagon existed is applied now instead of lost.
+        m_world->SetAngularVelocity(m_hex, m_hexOmega);
         return bh.index;
+    }
+
+    // A static box, e.g. the ground the hero's stack rests on. hw/hh are
+    // half-extents. Returns the body slot, or kInvalidSlot for a non-positive
+    // extent (a degenerate AABB would still reach the narrowphase).
+    std::uint32_t addStaticBox(float x, float y, float hw, float hh, float angle)
+    {
+        if (!(hw > 0.0f) || !(hh > 0.0f)) { return kInvalidSlot; }
+        BodyDef bd;
+        bd.type        = BodyType::Static;
+        bd.position    = Vec2(static_cast<Real>(x), static_cast<Real>(y));
+        bd.shape       = MakeAabb(static_cast<Real>(hw), static_cast<Real>(hh));
+        bd.friction    = kDynFriction;     // the engine default, same as the bodies on it
+        bd.restitution = kWallRestitution;
+        const BodyHandle bh = m_world->AddBody(bd);
+        if (angle != 0.0f) { m_world->SetAngle(bh, static_cast<Real>(angle)); }
+        return bh.index;
+    }
+
+    // The values this world was built with, for captions that quote them:
+    //   [gravityY, substepCount, contactHertz, contactDampingRatio,
+    //    restitutionThreshold, contactPushMaxVelocity, sleepThreshold,
+    //    dynamicRestitution, dynamicFriction]
+    // A typed_memory_view over wasm memory: copy it before the next call.
+    emscripten::val params()
+    {
+        m_params = {
+            static_cast<float>(m_def.gravityY),
+            static_cast<float>(m_def.substepCount),
+            static_cast<float>(m_def.contactHertz),
+            static_cast<float>(m_def.contactDampingRatio),
+            static_cast<float>(m_def.restitutionThreshold),
+            static_cast<float>(m_def.contactPushMaxVelocity),
+            static_cast<float>(m_def.sleepThreshold),
+            static_cast<float>(kDynRestitution),
+            static_cast<float>(kDynFriction)
+        };
+        return emscripten::val(emscripten::typed_memory_view(m_params.size(), m_params.data()));
     }
 
     // rad/s. The engine integrates a kinematic body's POSITION but never its
@@ -159,6 +200,7 @@ public:
 
     std::uint32_t addCircle(float x, float y, float r)
     {
+        if (!(r > 0.0f)) { return kInvalidSlot; }
         BodyDef bd;
         bd.type        = BodyType::Dynamic;
         bd.position    = Vec2(static_cast<Real>(x), static_cast<Real>(y));
@@ -172,6 +214,7 @@ public:
     // hw/hh are HALF-EXTENTS (MakeAabb's units).
     std::uint32_t addBox(float x, float y, float hw, float hh, float angle)
     {
+        if (!(hw > 0.0f) || !(hh > 0.0f)) { return kInvalidSlot; }
         BodyDef bd;
         bd.type        = BodyType::Dynamic;
         bd.position    = Vec2(static_cast<Real>(x), static_cast<Real>(y));
@@ -193,7 +236,7 @@ public:
         // catching, so validate HERE: a bad call returns kInvalidSlot instead of
         // aborting the module. 8 is the hero's upper bound, well under
         // kMaxPolyVerts (128).
-        if (sides < 3 || sides > 8)
+        if (sides < 3 || sides > 8 || !(radius > 0.0f))
         {
             return kInvalidSlot;
         }
@@ -201,9 +244,10 @@ public:
         verts.reserve(static_cast<std::size_t>(sides));
         for (int k = 0; k < sides; ++k)
         {
-            const Real t = static_cast<Real>(angle)
-                         + Real(2) * kPi * static_cast<Real>(k)
-                           / static_cast<Real>(sides);
+            // Unrotated local vertices; the orientation is the body's angle
+            // (SetAngle below), exactly as addBox does it, so a consumer draws
+            // vertex k at angle + 2*pi*k/sides with no correction.
+            const Real t = Real(2) * kPi * static_cast<Real>(k) / static_cast<Real>(sides);
             verts.push_back(Vec2(static_cast<Real>(radius) * std::cos(t),
                                  static_cast<Real>(radius) * std::sin(t)));
         }
@@ -215,7 +259,9 @@ public:
         bd.density     = kDynDensity;
         bd.friction    = kDynFriction;
         bd.restitution = kDynRestitution;
-        return m_world->AddBody(bd).index;
+        const BodyHandle bh = m_world->AddBody(bd);
+        m_world->SetAngle(bh, static_cast<Real>(angle));
+        return bh.index;
     }
 
     void step(float dt)
@@ -275,7 +321,9 @@ private:
     void advanceHexagon(Real dt)
     {
         if (m_hex.generation == 0u) { return; }   // no hexagon was added
-        m_hexAngle += m_hexOmega * dt;
+        // Wrap so a tab left open for days never lets the float's ulp reach
+        // the per-step increment.
+        m_hexAngle = std::fmod(m_hexAngle + m_hexOmega * dt, Real(2) * kPi);
         m_world->SetAngle(m_hex, m_hexAngle);
     }
 
@@ -337,6 +385,8 @@ private:
     StepTrace                     m_trace;
     std::vector<float>            m_bodies;
     std::vector<float>            m_traceBuf;
+    WorldDef                      m_def;      // what the world was built from (params())
+    std::array<float, 9>          m_params{}; // params()'s backing store
 };
 
 EMSCRIPTEN_BINDINGS(manifold)
@@ -349,6 +399,7 @@ EMSCRIPTEN_BINDINGS(manifold)
     emscripten::class_<ManifoldSim>("ManifoldSim")
         .constructor<float, int>()
         .function("addKinematicHexagon", &ManifoldSim::addKinematicHexagon)
+        .function("addStaticBox",        &ManifoldSim::addStaticBox)
         .function("setHexagonSpin",      &ManifoldSim::setHexagonSpin)
         .function("addCircle",           &ManifoldSim::addCircle)
         .function("addBox",              &ManifoldSim::addBox)
@@ -357,7 +408,8 @@ EMSCRIPTEN_BINDINGS(manifold)
         .function("stepTraced",          &ManifoldSim::stepTraced)
         .function("bodyCount",           &ManifoldSim::bodyCount)
         .function("bodies",              &ManifoldSim::bodies)
-        .function("trace",               &ManifoldSim::trace);
+        .function("trace",               &ManifoldSim::trace)
+        .function("params",              &ManifoldSim::params);
     // embind gives every class_ a .delete() automatically -- contract section 3's
     // sim.delete() needs no registration.
 }
