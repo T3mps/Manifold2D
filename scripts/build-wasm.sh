@@ -9,6 +9,14 @@
 #   scripts/build-wasm.sh                 library + bindings, linked to out/manifold.js
 #   scripts/build-wasm.sh --no-bindings    compile the library TUs only (no link):
 #                                          the toolchain proof, needs no bindings file
+#
+# Windows Git Bash: some emsdk releases (confirmed: 4.0.23) ship only
+# em++.bat/.ps1/.py under upstream/emscripten -- no extension-less `em++` --
+# so a bare `em++` will not resolve here even after sourcing emsdk_env.sh.
+# Fix: create <emsdk>/upstream/emscripten/em++ containing
+#   #!/usr/bin/env bash
+#   exec "${EMSDK_PYTHON:-python3}" -E "$(dirname "$0")/em++.py" "$@"
+# and chmod +x it; then emsdk_env.sh works as documented.
 set -euo pipefail
 shopt -s globstar
 
