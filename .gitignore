@@ -1,6 +1,7 @@
 # Build outputs
 bin/
 bin-int/
+out/
 
 # Generated project files (premake output)
 ide/
