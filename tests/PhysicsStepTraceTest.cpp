@@ -183,3 +183,131 @@ TEST_CASE("PhysicsStepTrace: the last snapshot equals the world's post-step stat
         CHECK(found);
     }
 }
+
+// ---------------------------------------------------------------------------
+// (2) StepTraced is behaviourally identical to Step
+// ---------------------------------------------------------------------------
+
+TEST_CASE("PhysicsStepTrace: StepTraced leaves the world bit-identical to Step",
+          "[physics][trace]")
+{
+    // The snapshot path adds ONE write to simulation state: it runs
+    // SimdSolve::StoreImpulses for every colored batch before reading, to pull
+    // the lane-resident accumulated impulses onto ctx.contacts. This case is the
+    // guard that the extra copy-out changes nothing -- the deterministic dynamic
+    // scene from PhysicsSolverTest.cpp:473-522, 240 steps, one world on Step and
+    // one on StepTraced, compared with ==.
+    WorldDef wd;
+    wd.sleepThreshold = Real(0);   // never sleep: all 240 steps really solve
+    PhysicsWorld plain(wd);
+    PhysicsWorld traced(wd);
+
+    const std::vector<BodyHandle> pb = BuildStack(plain, 4);
+    const std::vector<BodyHandle> tb = BuildStack(traced, 4);
+    REQUIRE(pb.size() == tb.size());
+
+    // The same sideways nudge the determinism case applies (box index 2).
+    const Real hw = Real(0.2), hh = Real(0.2);
+    const Real mass     = Real(1) * Real(4) * hw * hh;
+    const Real targetDv = Real(0.25);   // m/s
+    plain.ApplyImpulse(pb[2],  mass * Vec2(targetDv, Real(0)));
+    traced.ApplyImpulse(tb[2], mass * Vec2(targetDv, Real(0)));
+
+    for (int k = 0; k < 240; ++k)
+    {
+        plain.Step(kStep);
+        StepTrace throwaway;
+        traced.StepTraced(kStep, throwaway);
+        REQUIRE(throwaway.snapshots.size() == 22u);
+    }
+
+    for (std::size_t i = 0; i < pb.size(); ++i)
+    {
+        const Vec2 pp = plain.Position(pb[i]);
+        const Vec2 tp = traced.Position(tb[i]);
+        const Vec2 pv = plain.Velocity(pb[i]);
+        const Vec2 tv = traced.Velocity(tb[i]);
+        REQUIRE(tp.x == pp.x);
+        REQUIRE(tp.y == pp.y);
+        REQUIRE(tv.x == pv.x);
+        REQUIRE(tv.y == pv.y);
+        REQUIRE(traced.GetAngle(tb[i])         == plain.GetAngle(pb[i]));
+        REQUIRE(traced.AngularVelocity(tb[i])  == plain.AngularVelocity(pb[i]));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// (4) Relax removes the bias-injected energy
+// ---------------------------------------------------------------------------
+
+namespace
+{
+    // Max |normal-direction relative velocity| over a snapshot's contact points,
+    // computed from that snapshot's OWN bodies: the relative velocity at the
+    // contact point is dv = (vA + wA x rA) - (vB + wB x rB) with
+    // CrossWR(w, r) == (-w*r.y, w*r.x) and r = point - body position. A
+    // static/span B (bodyB == kInvalidSlot, or a slot with no row in this
+    // snapshot) contributes nothing, matching the solver's zero identity.
+    Real MaxNormalVel(const StepTraceSnapshot& s)
+    {
+        Real worst = Real(0);
+        for (const StepTraceContact& c : s.contacts)
+        {
+            const StepTraceBody* a = nullptr;
+            const StepTraceBody* b = nullptr;
+            for (const StepTraceBody& body : s.bodies)
+            {
+                if (body.body == c.bodyA) { a = &body; }
+                if (c.bodyB != kInvalidSlot && body.body == c.bodyB) { b = &body; }
+            }
+            if (a == nullptr) { continue; }   // A is always an awake dynamic row
+            const Vec2 rA(c.point.x - a->position.x, c.point.y - a->position.y);
+            Vec2 dv(a->velocity.x - a->angularVelocity * rA.y,
+                    a->velocity.y + a->angularVelocity * rA.x);
+            if (b != nullptr)
+            {
+                const Vec2 rB(c.point.x - b->position.x, c.point.y - b->position.y);
+                dv.x -= (b->velocity.x - b->angularVelocity * rB.y);
+                dv.y -= (b->velocity.y + b->angularVelocity * rB.x);
+            }
+            const Real vn = std::fabs(dv.x * c.normal.x + dv.y * c.normal.y);
+            if (vn > worst) { worst = vn; }
+        }
+        return worst;
+    }
+}
+
+TEST_CASE("PhysicsStepTrace: a resting stack's Relax never exceeds its Solve",
+          "[physics][trace]")
+{
+    WorldDef wd;
+    wd.sleepThreshold = Real(0);   // the stack must stay awake through 120 steps
+    PhysicsWorld w(wd);
+    const std::vector<BodyHandle> boxes = BuildStack(w, 4);
+    for (int k = 0; k < 120; ++k) { w.Step(kStep); }   // resting
+    for (const BodyHandle h : boxes) { REQUIRE(w.IsAwake(h)); }
+
+    StepTrace trace;
+    w.StepTraced(kStep, trace);
+    REQUIRE(trace.snapshots.size() == 22u);
+
+    // A resting 4-box stack on a floor has contacts in EVERY stage -- if a
+    // snapshot came back empty, the contact capture (not the physics) is broken.
+    for (const StepTraceSnapshot& s : trace.snapshots)
+    {
+        CHECK(s.contacts.size() > 0u);
+    }
+
+    for (int sub = 0; sub < 4; ++sub)
+    {
+        const StepTraceSnapshot& solve = trace.snapshots[static_cast<std::size_t>(5 * sub + 2)];
+        const StepTraceSnapshot& relax = trace.snapshots[static_cast<std::size_t>(5 * sub + 4)];
+        REQUIRE(solve.stage == StageType::Solve);
+        REQUIRE(relax.stage == StageType::Relax);
+        REQUIRE(solve.substep == static_cast<std::uint8_t>(sub));
+        REQUIRE(relax.substep == static_cast<std::uint8_t>(sub));
+        // The bias-free relax pass removes the energy the biased solve injected,
+        // so it never leaves MORE closing/separating normal velocity behind.
+        CHECK(MaxNormalVel(relax) <= MaxNormalVel(solve));
+    }
+}

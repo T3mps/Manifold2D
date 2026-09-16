@@ -1965,6 +1965,122 @@ namespace Manifold2D
                     snap.bodies.push_back(tb);
                 }
 
+                // ---- force the lane -> constraint impulse copy-out ---------
+                //
+                // The colored solve accumulates each point's normal/tangent
+                // impulse in the per-color ContactConstraintSimd SoA batches;
+                // ctx.contacts[].points[].normalImpulse/tangentImpulse are only
+                // refreshed by the StoreImpulses STAGE at the very end of the
+                // step. Running the SAME routine that stage runs
+                // (SimdSolve::StoreImpulses, ContactConstraintSimd.hpp:1009-1030
+                // -- a pure lane->point copy of normalImpulse/tangentImpulse and
+                // nothing else) gives every snapshot the ACCUMULATED impulses as
+                // of that stage.
+                //
+                // BEHAVIOURALLY NEUTRAL, and pinned by the "bit-identical to
+                // Step" case: between here and the real StoreImpulses stage
+                // nothing reads a COLORED constraint's point impulses -- the
+                // lane-wide SimdSolve::WarmStart / SolveNormalAndFriction /
+                // ApplyRestitution passes read the batches, and the scalar
+                // Overflow* trio reads only m_overflowRefs, which is disjoint
+                // from every color bucket (SoftStep.cpp:929-931 buckets each
+                // constraint into exactly one of the two). The overflow path
+                // already mutates ctx.contacts[ref].points[] in place
+                // (SoftStep::OverflowSolve), so overflow contacts are already
+                // current with no help from us.
+                for (std::size_t k = 0; k < static_cast<std::size_t>(kColorCount); ++k)
+                {
+                    const std::vector<ContactConstraintSimd>& batches =
+                        (*sc.colorBatches)[k];
+                    if (batches.empty()) { continue; }
+                    SimdSolve::StoreImpulses(batches, sc.ctx->contacts,
+                                             sc.colorRefs[k].data());
+                }
+
+                // ---- contacts: one record per manifold point ---------------
+                std::size_t pointTotal = 0;
+                for (std::uint32_t ci = 0; ci < sc.ctx->contactCount; ++ci)
+                {
+                    pointTotal += static_cast<std::size_t>(sc.ctx->contacts[ci].pointCount);
+                }
+                snap.contacts.reserve(pointTotal);
+
+                for (std::uint32_t ci = 0; ci < sc.ctx->contactCount; ++ci)
+                {
+                    const ContactConstraint& cc = sc.ctx->contacts[ci];
+
+                    // TGS pose deltas. A is ALWAYS an awake dynamic, so it has a
+                    // row. B carries deltas only when it is a real DYNAMIC body
+                    // -- the exact `dynB` gate SoftStep's OverflowSetup uses
+                    // (SoftStep.cpp:552); a kinematic, static or span B never
+                    // integrates, so its dp/dq are the zero identity.
+                    const std::uint32_t rowA = AwakeIndexOf(cc.bodyA);
+                    const Vec2 dpA(static_cast<Real>(sc.bodyState[rowA].dpx),
+                                   static_cast<Real>(sc.bodyState[rowA].dpy));
+                    const Real dqA = static_cast<Real>(sc.bodyState[rowA].dq);
+                    Vec2 dpB(Real(0), Real(0));
+                    Real dqB = Real(0);
+                    const bool dynB = cc.bodyBIsBody && cc.invMassB > Real(0);
+                    if (dynB)
+                    {
+                        const std::uint32_t rowB = AwakeIndexOf(cc.bodyB);
+                        dpB = Vec2(static_cast<Real>(sc.bodyState[rowB].dpx),
+                                   static_cast<Real>(sc.bodyState[rowB].dpy));
+                        dqB = static_cast<Real>(sc.bodyState[rowB].dq);
+                    }
+
+                    // Fixture ids through the PERSISTENT pool. A transient tile-
+                    // span constraint has no pool home (sourceContactId ==
+                    // kNoContact) and keeps kInvalidSlot. m_graph is a private
+                    // member of this class, so no friendship is needed.
+                    std::uint32_t fixA = kInvalidSlot;
+                    std::uint32_t fixB = kInvalidSlot;
+                    if (cc.sourceContactId != ContactConstraint::kNoContact &&
+                        m_graph.Pool().Alive(cc.sourceContactId))
+                    {
+                        const Contact& src = m_graph.Pool().Get(cc.sourceContactId);
+                        fixA = src.a.index;
+                        fixB = src.b.index;
+                    }
+
+                    // anchorA is (contact point - A's CENTRE OF MASS) as of
+                    // Prepare (ConstraintGraph.cpp:1167), so the world point is
+                    // A's mid-step COM + anchorA, and the mid-step COM is the
+                    // start COM plus the accumulated dp.
+                    const TraceStartPose& spA = traceStart[rowA];
+                    const Vec2 comA = spA.pos
+                                    + RotateVec(spA.angle, spA.localCenter) + dpA;
+
+                    for (int p = 0; p < cc.pointCount; ++p)
+                    {
+                        const ContactConstraintPoint& cp = cc.points[p];
+                        // TGS CURRENT separation, verbatim the solver's own form
+                        // (ContactConstraintSimd.hpp:801-807, mirrored scalar in
+                        // SoftStep::OverflowSolve):
+                        //   s = baseSeparation
+                        //       + dot((dpA + dqA x rA) - (dpB + dqB x rB), n)
+                        // with CrossWR(w, r) == (-w*r.y, w*r.x) inlined. s > 0 is
+                        // a speculative gap; s < 0 is penetration.
+                        const Vec2 prA(dpA.x - dqA * cp.anchorA.y,
+                                       dpA.y + dqA * cp.anchorA.x);
+                        const Vec2 prB(dpB.x - dqB * cp.anchorB.y,
+                                       dpB.y + dqB * cp.anchorB.x);
+
+                        StepTraceContact tc;
+                        tc.bodyA          = cc.bodyA;
+                        tc.bodyB          = cc.bodyBIsBody ? cc.bodyB : kInvalidSlot;
+                        tc.fixtureA       = fixA;
+                        tc.fixtureB       = fixB;
+                        tc.point          = comA + cp.anchorA;
+                        tc.normal         = cc.normal;
+                        tc.separation     = cp.baseSeparation
+                                          + Geometry::Dot(prA - prB, cc.normal);
+                        tc.normalImpulse  = cp.normalImpulse;
+                        tc.tangentImpulse = cp.tangentImpulse;
+                        snap.contacts.push_back(tc);
+                    }
+                }
+
                 trace->snapshots.push_back(std::move(snap));
             };
 
