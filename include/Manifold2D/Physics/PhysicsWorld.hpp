@@ -84,6 +84,7 @@
 #include <Manifold2D/Physics/Island.hpp>             // Island::Island registry struct + constants (Phase A)
 #include <Manifold2D/Physics/IslandManager.hpp>      // island topology collaborator (decomp step 1)
 #include <Manifold2D/Physics/ConstraintGraph.hpp>    // contact subsystem collaborator (decomp step 2)
+#include <Manifold2D/Physics/StepTrace.hpp>          // StepTraced's snapshot record
 
 namespace Manifold2D
 {
@@ -543,6 +544,23 @@ namespace Manifold2D
             // integration + mover-broadphase update, then ContactManager::Step
             // (events + gating + deferred flush). NO dynamics solving.
             void Step(Real dt);
+
+            // Step(dt) PLUS one StepTraceSnapshot after every solver stage: the
+            // five in-sub-step stages (IntegrateVelocities / WarmStart / Solve /
+            // IntegratePositions / Relax) with their sub-step index, then
+            // Restitution and StoreImpulses once with substep == substepCount.
+            // At the default substepCount == 4 that is exactly 22 snapshots,
+            // APPENDED to trace.snapshots (clear it yourself to keep one step).
+            //
+            // Shares ONE implementation with Step (StepImpl), so the world it
+            // leaves is BIT-IDENTICAL to the world Step(dt) would have left: the
+            // snapshots are pure reads plus one behaviourally-neutral
+            // lane->constraint impulse copy-out (SimdSolve::StoreImpulses, which
+            // the StoreImpulses stage runs anyway). It ALLOCATES (the snapshot
+            // vectors), so this is an inspection / visualization entry point --
+            // not for a hot loop, and not covered by the zero-steady-state-alloc
+            // contract Step honors.
+            void StepTraced(Real dt, StepTrace& trace);
 
             // Phase D1: inject the task executor the solver parallelizes over.
             // nullptr -> the world's owned SerialWorkScheduler (deterministic default).
@@ -1125,6 +1143,12 @@ namespace Manifold2D
             { return m_residencyGrid.QueryAABB(region, out); }
 
         private:
+            // The ONE Step implementation. trace == nullptr -> exactly Step(dt)
+            // (the only added cost is a null check before the solve); non-null ->
+            // record each solver row's start pose and install the per-stage
+            // snapshot hook on SolverContext::traceHook. See StepTraced.
+            void StepImpl(Real dt, StepTrace* trace);
+
             // ---- per-fixture broadphase helpers (Phase 2, Task 1) -------------
             //
             // UpdateMoverProxies(b): refreshes residency and all fixture proxies in

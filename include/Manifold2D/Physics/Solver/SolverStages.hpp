@@ -186,6 +186,13 @@ namespace Manifold2D
             Mosaic::FunctionRef<void(bool)> overflowSolve{};
             Mosaic::FunctionRef<void()>     overflowRestitution{};
             Mosaic::FunctionRef<void()>     jointBridge{}; // Sync->Solve->Sync (no-op if no joints)
+
+            // StepTrace hook, copied from SolverContext::traceHook by
+            // SoftStep::Solve. Empty unless PhysicsWorld::StepTraced installed
+            // one; invoked by the MAIN branch of SolverWorker only (never by a
+            // thief -- a thief must not observe or publish anything but block
+            // claims, and under SerialWorkScheduler no thief exists at all).
+            Mosaic::FunctionRef<void(StageType, int, const SolverStageContext&)> traceHook{};
         };
 
         // -----------------------------------------------------------------------
@@ -425,28 +432,44 @@ namespace Manifold2D
             }
 
             // ----- Main / orchestrator (workerIndex == 0) ----------------------
+            // TRACE HOOK placement: after a colored stage group's LAST color AND
+            // after that group's overflow pass, because the overflow bucket
+            // mutates the SAME BodyState rows (and, for solve/restitution, the
+            // same ContactConstraint points) the colored batches just wrote -- a
+            // snapshot taken before it would miss the spilled contacts' effect.
+            // The two body stages have no overflow twin, so their hook fires
+            // right after ExecuteMainStage. Both hooks for WarmStart and
+            // IntegratePositions fire BEFORE the joint bridge, which is a
+            // different (scalar, world-velocity) pass, not part of the stage.
             const int C = sc.activeColorStages;
             for (int s = 0; s < sc.substepCount; ++s)
             {
                 ExecuteMainStage(sc, 0); // IntegrateVelocities
+                if (sc.traceHook) { sc.traceHook(StageType::IntegrateVelocities, s, sc); }
 
                 for (int c = 0; c < C; ++c) { ExecuteMainStage(sc, 1 + c); }          // WarmStart
                 if (sc.overflowWarmStart) { sc.overflowWarmStart(); }
+                if (sc.traceHook) { sc.traceHook(StageType::WarmStart, s, sc); }
                 if (sc.jointBridge) { sc.jointBridge(); }                              // joint pass #1
 
                 for (int c = 0; c < C; ++c) { ExecuteMainStage(sc, 1 + C + c); }      // Solve (bias)
                 if (sc.overflowSolve) { sc.overflowSolve(true); }
+                if (sc.traceHook) { sc.traceHook(StageType::Solve, s, sc); }
 
                 ExecuteMainStage(sc, 1 + 2 * C);                                       // IntegratePositions
+                if (sc.traceHook) { sc.traceHook(StageType::IntegratePositions, s, sc); }
                 if (sc.jointBridge) { sc.jointBridge(); }                              // joint pass #2
 
                 for (int c = 0; c < C; ++c) { ExecuteMainStage(sc, 2 + 2 * C + c); }  // Relax (no bias)
                 if (sc.overflowSolve) { sc.overflowSolve(false); }
+                if (sc.traceHook) { sc.traceHook(StageType::Relax, s, sc); }
             }
 
             for (int c = 0; c < C; ++c) { ExecuteMainStage(sc, 2 + 3 * C + c); }      // Restitution (once)
             if (sc.overflowRestitution) { sc.overflowRestitution(); }
+            if (sc.traceHook) { sc.traceHook(StageType::Restitution, sc.substepCount, sc); }
             for (int c = 0; c < C; ++c) { ExecuteMainStage(sc, 2 + 4 * C + c); }      // StoreImpulses (once)
+            if (sc.traceHook) { sc.traceHook(StageType::StoreImpulses, sc.substepCount, sc); }
 
             // Liveness: tell every thief to exit so ParallelFor's join completes.
             // Release so a thief observing it has seen all of the region's writes.

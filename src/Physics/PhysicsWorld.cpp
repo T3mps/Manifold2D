@@ -1707,6 +1707,16 @@ namespace Manifold2D
 
         void PhysicsWorld::Step(Real dt)
         {
+            StepImpl(dt, nullptr);
+        }
+
+        void PhysicsWorld::StepTraced(Real dt, StepTrace& trace)
+        {
+            StepImpl(dt, &trace);
+        }
+
+        void PhysicsWorld::StepImpl(Real dt, StepTrace* trace)
+        {
             // STEP ORDER (P2.2 -- Box2D v3 TGS Soft restructure of the P1.8/P2.1
             // pipeline). The P2.1 INLINE dynamic gravity-integrate (old stage 1)
             // and dynamic position-integrate (old stage 4) are SUPERSEDED: the
@@ -1874,6 +1884,90 @@ namespace Manifold2D
                 m_jointConstraints.push_back(jc);
             }
 
+            // ---- stage 3 (traced only): start poses + the per-stage snapshot --
+            //
+            // The solver keeps its mid-step pose deltas in its own BodyState rows
+            // (dpx/dpy/dq, zeroed by SyncInCompacted) and commits them to the
+            // world ONCE, after the stage walk, in SoftStep::FinalizePositionsSoA.
+            // A snapshot therefore composes each row's START pose with the deltas
+            // accumulated so far. Indexed by DENSE solverIndex to match
+            // BodyState: awake dynamics at AwakeIndexOf(slot) in [0, AwakeCount()),
+            // kinematics at AwakeCount() + KinematicIndexOf(slot). Recording the
+            // poses here (rather than reading PosSlot inside the hook) makes the
+            // snapshot independent of anything the solver region might commit in
+            // future. Both stay empty -- no allocation -- on the Step(dt) path.
+            struct TraceStartPose
+            {
+                std::uint32_t slot = kInvalidSlot;
+                Vec2          pos{ Real(0), Real(0) };
+                Real          angle = Real(0);
+                Vec2          localCenter{ Real(0), Real(0) };
+            };
+            std::vector<TraceStartPose> traceStart;
+            if (trace != nullptr)
+            {
+                const std::uint32_t awakeRows = AwakeCount();
+                traceStart.assign(
+                    static_cast<std::size_t>(awakeRows + KinematicCount()),
+                    TraceStartPose{});
+                ForEachAwake([&](std::uint32_t s)
+                {
+                    TraceStartPose& sp = traceStart[AwakeIndexOf(s)];
+                    sp.slot        = s;
+                    sp.pos         = PosSlot(s);
+                    sp.angle       = AngleSlot(s);
+                    sp.localCenter = LocalCenterSlot(s);
+                });
+                ForEachKinematic([&](std::uint32_t s)
+                {
+                    TraceStartPose& sp = traceStart[awakeRows + KinematicIndexOf(s)];
+                    sp.slot        = s;
+                    sp.pos         = PosSlot(s);
+                    sp.angle       = AngleSlot(s);
+                    sp.localCenter = LocalCenterSlot(s);
+                });
+            }
+
+            auto traceHookFn = [&](StageType stage, int substep,
+                                   const SolverStageContext& sc)
+            {
+                StepTraceSnapshot snap;
+                snap.stage   = stage;
+                snap.substep = static_cast<std::uint8_t>(substep);
+
+                // ---- bodies, in dense solver-row order --------------------
+                snap.bodies.reserve(traceStart.size());
+                for (std::size_t row = 0; row < traceStart.size(); ++row)
+                {
+                    const TraceStartPose& sp = traceStart[row];
+                    const BodyState&      bs = sc.bodyState[row];
+                    // Compound-COM composition, verbatim SoftStep::
+                    // FinalizePositionsSoA: c = (p0 + R(a0)*lc) + dp;
+                    // a = a0 + dq; p = c - R(a)*lc. For localCenter == (0,0)
+                    // (every single-fixture body) this reduces exactly to
+                    // p0 + dp / a0 + dq, and matching the commit expression
+                    // is what makes the LAST snapshot bit-identical to the
+                    // pose the Step leaves behind.
+                    const Vec2 dp(static_cast<Real>(bs.dpx),
+                                  static_cast<Real>(bs.dpy));
+                    const Real dr = static_cast<Real>(bs.dq);
+                    const Vec2 c0 = sp.pos + RotateVec(sp.angle, sp.localCenter);
+                    const Vec2 c  = c0 + dp;
+                    const Real a  = sp.angle + dr;
+
+                    StepTraceBody tb;
+                    tb.body            = sp.slot;
+                    tb.position        = c - RotateVec(a, sp.localCenter);
+                    tb.angle           = a;
+                    tb.velocity        = Vec2(static_cast<Real>(bs.vx),
+                                              static_cast<Real>(bs.vy));
+                    tb.angularVelocity = static_cast<Real>(bs.w);
+                    snap.bodies.push_back(tb);
+                }
+
+                trace->snapshots.push_back(std::move(snap));
+            };
+
             {
                 ARCANE_STEPPROF_SCOPE(Solve);
                 SolverContext ctx;
@@ -1893,6 +1987,7 @@ namespace Manifold2D
                 ctx.invSubDt     = ctx.subDt > Real(0) ? Real(1) / ctx.subDt : Real(0);
                 ctx.gravity      = Vec2(m_gravityX, m_gravityY);
                 ctx.executor     = Executor();   // Phase D1: always non-null (serial default)
+                if (trace != nullptr) { ctx.traceHook = traceHookFn; }
                 m_solver->Solve(ctx);
             }
 

@@ -40,6 +40,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include <Mosaic/FunctionRef.hpp>           // SolverContext::traceHook (StepTrace seam)
 #include <Manifold2D/Physics/Contact.hpp>   // kInvalidColor (persistent contact coloring, Phase C Task 5)
 #include <Manifold2D/Physics/Narrowphase/NarrowphaseTrace.hpp>
 #include <Manifold2D/Physics/PhysicsTypes.hpp>
@@ -54,6 +55,8 @@ namespace Manifold2D
         struct Manifold;    // Narrowphase/Manifold.hpp -- per-pair contact points
         struct Joint;       // Joints/Joint.hpp (P2.5) -- forward-declared so JointConstraint
                             // can hold a typed pointer without pulling the full definition.
+        struct SolverStageContext;           // Solver/SolverStages.hpp -- the per-step stage bundle
+        enum class StageType : std::uint8_t; // Solver/SolverStages.hpp -- the seven stage kinds
 
         // ----------------------------------------------------------------
         // ContactConstraintPoint: one solvable contact point (P2.2 Soft Step).
@@ -219,6 +222,18 @@ namespace Manifold2D
             // Task-parallelism seam (Phase D1). Always non-null when the solver runs
             // (PhysicsWorld resolves it to its serial default if none was injected).
             Mosaic::IWorkScheduler* executor = nullptr;
+
+            // StepTrace seam (PhysicsWorld::StepTraced). EMPTY on the Step(dt)
+            // path: SoftStep::Solve copies it into SolverStageContext and
+            // SolverWorker guards every call with `if (sc.traceHook)`, so an
+            // untraced Step pays one never-taken branch per stage group and
+            // nothing else. Called on the MAIN/orchestrator worker only, after
+            // each stage group AND that group's overflow pass, with the stage
+            // kind, the sub-step index (substepCount for the once-per-step
+            // Restitution/StoreImpulses) and the live stage context.
+            // NON-OWNING (FunctionRef): the referent must outlive Solve --
+            // PhysicsWorld::StepImpl's lambda is a local of the calling frame.
+            Mosaic::FunctionRef<void(StageType, int, const SolverStageContext&)> traceHook{};
         };
 
         // ----------------------------------------------------------------

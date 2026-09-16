@@ -1014,6 +1014,7 @@ namespace Manifold2D
             sc.h                 = static_cast<float>(h);
             sc.maxBiasVel        = maxBiasVel;
             sc.threshold         = threshold;
+            sc.traceHook         = ctx.traceHook;   // empty on the Step(dt) path
 
             // Bind the body-integrate range + the main-serial overflow/joint passes as
             // non-escaping lambdas (FunctionRef views -- they MUST outlive SolverWorker,
