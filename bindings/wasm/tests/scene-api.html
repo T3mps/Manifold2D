@@ -501,16 +501,20 @@ check('setBodyFilter moves a live box between lanes: it falls through, then coll
   return (near(stacked, 0.45, 0.03) && near(fell, 0.75, 0.03) && dx > 0.28) || fail('lanes', { stacked, fell, dx });
 });
 
-check('a fast box is stopped by a thin KINEMATIC wall (movers are paired before contact)', () => {
-  const s = new M.ManifoldSim(0, 4);
-  const wall = s.addBody(KINEMATIC, BOX, 0, 0, 0, 0.07, 2.5);
-  s.setKinematic(wall, 0, 0, 0);
-  const b = s.addBody(DYNAMIC, BOX, -3, 0, 0, 0.15, 0.15);
-  s.setVelocity(b, 40, 0, 0);
-  let maxX = -9;
-  for (let i = 0; i < 60; i++) { s.step(1 / 60); maxX = Math.max(maxX, row(s, b)[0]); }
-  s.delete();
-  return maxX < -0.07 - 0.15 + 0.12 || fail('kinematic wall', { maxX });
+check('a thin KINEMATIC wall stops a fast box exactly as a static one does (movers are paired before contact)', () => {
+  const fire = (type) => {
+    const s = new M.ManifoldSim(0, 4);
+    const wall = s.addBody(type, BOX, 0, 0, 0, 0.07, 2.5);
+    if (type === KINEMATIC) s.setKinematic(wall, 0, 0, 0);
+    const b = s.addBody(DYNAMIC, BOX, -3, 0, 0, 0.15, 0.15);
+    s.setVelocity(b, 40, 0, 0);
+    let maxX = -9;
+    for (let i = 0; i < 60; i++) { s.step(1 / 60); maxX = Math.max(maxX, row(s, b)[0]); }
+    s.delete();
+    return maxX;
+  };
+  const st = fire(STATIC), kin = fire(KINEMATIC);
+  return (kin === st && kin < 0) || fail('kinematic vs static', { st, kin });
 });
 
 check('setBullet: a fast spinning thin bar is stopped by a thin kinematic wall', () => {
