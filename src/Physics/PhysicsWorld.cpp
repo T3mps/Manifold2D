@@ -27,6 +27,7 @@
 #include <Manifold2D/Physics/Broadphase/SpatialHash.hpp>
 #include <Manifold2D/Physics/Broadphase/SweepAndPrune.hpp>
 #include <Manifold2D/Physics/Narrowphase/GeometryKernel.hpp> // AabbOverlap (QueryAABB)
+#include <Manifold2D/Physics/Narrowphase/Gjk.hpp>          // ShapeCast / ShapeCastPoly (bullet CCD)
 #include <Manifold2D/Physics/Narrowphase/Collide.hpp>        // Collide (rotation-aware fixture-pair narrowphase: contacts T5, events/overlap T7)
 #include <Manifold2D/Physics/Solver/SoftStep.hpp>            // SoftStep solver impl (THE solver)
 #include <Manifold2D/Physics/Island.hpp>                     // island sleep pass (stage 4)
@@ -1692,6 +1693,21 @@ namespace Manifold2D
             }
         }
 
+        void PhysicsWorld::SetBullet(BodyHandle h, bool bullet)
+        {
+            if (!IsValid(h))
+            {
+                MOSAIC_LOG_WARN("operation on a stale/invalid BodyHandle ignored");
+                return;
+            }
+            m_bullet[h.index] = bullet ? std::uint8_t(1) : std::uint8_t(0);
+        }
+
+        bool PhysicsWorld::IsBullet(BodyHandle h) const noexcept
+        {
+            return IsValid(h) && m_bullet[h.index] != 0;
+        }
+
         void PhysicsWorld::SetBodyFilter(BodyHandle h, std::uint32_t categoryBits, std::uint32_t maskBits)
         {
             if (!IsValid(h))
@@ -2326,6 +2342,103 @@ namespace Manifold2D
         // m_graph calls at the create/destroy/grow seams.
 
 
+        Real PhysicsWorld::CcdFixtureToi(std::uint32_t body, std::uint32_t fi,
+                                         const Transform& start, const Vec2& delta)
+        {
+            // Box2D v3 b2SolveContinuous + b2ContinuousQueryCallback, for one fixture:
+            //   * obstacles: statics (and tile spans) always; kinematic and non-bullet
+            //     dynamic bodies when the bullet is DYNAMIC (a bullet sweeps the
+            //     kinematic and dynamic trees). Movers stand at their END-of-step
+            //     transforms, as Box2D's do. Other bullets are skipped (Box2D: "skip
+            //     bullets"), as are the bullet's own body and sensors.
+            //   * the collision filter decides, exactly as for contacts: each side's
+            //     category must be in the other's mask. (ShapeCast -- the query, Box2D's
+            //     b2World_CastShape -- ignores filters, so the sweep used to as well.)
+            //   * only 0 < t counts for a DYNAMIC bullet (Box2D: 0 < fraction): a
+            //     fixture already touching an obstacle at the start -- lying on a
+            //     floor, pressed against a wall -- is left to the contact solver, not
+            //     frozen in place. A KINEMATIC bullet (Manifold2D's own; Box2D has
+            //     none) has no solver to stop it, so a touch at the start still blocks
+            //     it when the step moves INTO the obstacle (the normal points from the
+            //     obstacle toward the bullet) -- held at a wall, free to slide along
+            //     a floor or move away.
+            const Shape& shape = m_fxShape[fi];
+            const Transform end{ Vec2(start.position.x + delta.x, start.position.y + delta.y), start.rotation };
+            const Aabb2 a = shape.ComputeAABB(start);
+            const Aabb2 b = shape.ComputeAABB(end);
+            Aabb2 swept;
+            swept.min = Vec2(std::min(a.min.x, b.min.x) - kShapeCastTol, std::min(a.min.y, b.min.y) - kShapeCastTol);
+            swept.max = Vec2(std::max(a.max.x, b.max.x) + kShapeCastTol, std::max(a.max.y, b.max.y) + kShapeCastTol);
+
+            const std::uint32_t catA = m_fxFilterCat[fi], maskA = m_fxFilterMask[fi];
+            const auto admits = [&](std::uint32_t fj)
+            {
+                return (catA & m_fxFilterMask[fj]) != 0u && (m_fxFilterCat[fj] & maskA) != 0u;
+            };
+            const bool kinematic = static_cast<BodyType>(m_btype[body]) == BodyType::Kinematic;
+            Real best = Real(1);
+            const auto consider = [&](const ShapeCastResult& r)
+            {
+                if (!r.hit) { return; }
+                if (r.t > Real(0))
+                {
+                    if (r.t < best) { best = r.t; }
+                }
+                else if (kinematic && delta.x * r.normal.x + delta.y * r.normal.y < Real(0))
+                {
+                    best = Real(0); // touching at the start and moving into it
+                }
+            };
+            const auto castFixture = [&](std::uint32_t fj)
+            {
+                const std::uint32_t bj = m_fxBody[fj];
+                const Transform xf = ComposeFixtureXf(
+                    Vec2(m_posX[bj], m_posY[bj]), m_angle[bj],
+                    Vec2(m_fxLocalPosX[fj], m_fxLocalPosY[fj]), m_fxLocalAngle[fj]);
+                consider(::Manifold2D::Physics::ShapeCast(shape, start, delta, m_fxShape[fj], xf));
+            };
+
+            StaticCandidates(swept, m_scratchSpans, m_scratchStatics, m_staticGridScratch);
+            for (const Aabb2& span : m_scratchSpans) // tile terrain: no fixture, no filter
+            {
+                Vec2 poly[4];
+                AabbToCorners(span, poly);
+                consider(ShapeCastPoly(shape, start, delta, poly, 4));
+            }
+            for (const std::uint32_t idx : m_scratchStatics)
+            {
+                if (m_sensor[idx] != 0) { continue; }
+                if (idx < m_bodyFixtures.size() && !m_bodyFixtures[idx].empty())
+                {
+                    for (const std::uint32_t fj : m_bodyFixtures[idx])
+                    {
+                        if (fj >= m_fxCount || m_fxGen[fj] == 0u || m_fxSensor[fj] != 0u || !admits(fj)) { continue; }
+                        castFixture(fj);
+                    }
+                }
+                else // a fixtureless legacy static: its single shape, unfiltered
+                {
+                    consider(::Manifold2D::Physics::ShapeCast(shape, start, delta, m_shape[idx],
+                                                              Transform{ Vec2(m_posX[idx], m_posY[idx]), m_angle[idx] }));
+                }
+            }
+
+            if (static_cast<BodyType>(m_btype[body]) == BodyType::Dynamic)
+            {
+                m_ccdMoverScratch.clear();
+                m_fixtureBroadphase->QueryAABB(swept, m_ccdMoverScratch);
+                for (const std::uint32_t fj : m_ccdMoverScratch)
+                {
+                    if (fj >= m_fxCount || m_fxGen[fj] == 0u || m_fxSensor[fj] != 0u) { continue; }
+                    const std::uint32_t bj = m_fxBody[fj];
+                    if (bj == body || m_alive[bj] == 0 || m_sensor[bj] != 0 || m_bullet[bj] != 0) { continue; }
+                    if (!admits(fj)) { continue; }
+                    castFixture(fj);
+                }
+            }
+            return best;
+        }
+
         void PhysicsWorld::BulletSweep()
         {
             // P3.1 CCD bullet clamp (port of PhysicsWorld.lua:313-320). For each
@@ -2362,9 +2475,11 @@ namespace Manifold2D
                 MOSAIC_ASSERT(static_cast<BodyType>(m_btype[i]) != BodyType::Static,
                               "bullets are never static");
 
-                // STATICS ONLY: default ShapeCastOpts (movers = false) casts vs
-                // tile spans + non-sensor static bodies. The bullet body is a
-                // mover, so it is never a self-obstacle here (no exclude needed).
+                // Obstacles (CcdFixtureToi, after Box2D v3's b2SolveContinuous):
+                // tile spans and static bodies for every bullet; kinematic and
+                // non-bullet dynamic bodies too for a DYNAMIC bullet. Collision
+                // filters and sensors are honoured, and a touch at the start of the
+                // sweep is not an impact (a bullet resting on something moves on).
                 //
                 // T7 Part C (ROTATION + FIXTURE AWARE CCD): sweep EACH of the
                 // bullet's fixtures with the body's REAL angle and the fixture's
@@ -2400,12 +2515,10 @@ namespace Manifold2D
                             prev, bodyAngle,
                             Vec2(m_fxLocalPosX[fi], m_fxLocalPosY[fi]),
                             m_fxLocalAngle[fi]);
-                        const std::optional<ShapeCastHit> fxHit =
-                            ShapeCast(m_fxShape[fi], fxStart.position, delta,
-                                      ShapeCastOpts{}, fxStart.rotation);
-                        if (fxHit && fxHit->t < bestT)
+                        const Real t = CcdFixtureToi(i, fi, fxStart, delta);
+                        if (t < bestT)
                         {
-                            bestT   = fxHit->t;
+                            bestT   = t;
                             haveHit = true;
                         }
                     }
@@ -2415,7 +2528,11 @@ namespace Manifold2D
                     // Legacy fallback: single m_shape at the body's real angle.
                     const std::optional<ShapeCastHit> hit =
                         ShapeCast(m_shape[i], prev, delta, ShapeCastOpts{}, bodyAngle);
-                    if (hit && hit->t < bestT)
+                    // a touch at the start blocks only a kinematic bullet moving into it (see CcdFixtureToi)
+                    const bool kin = static_cast<BodyType>(m_btype[i]) == BodyType::Kinematic;
+                    const bool counts = hit && (hit->t > Real(0) ||
+                        (kin && delta.x * hit->normal.x + delta.y * hit->normal.y < Real(0)));
+                    if (counts && hit->t < bestT)
                     {
                         bestT   = hit->t;
                         haveHit = true;

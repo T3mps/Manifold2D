@@ -343,7 +343,7 @@ check('the existing hero API is unchanged', () => {
 
 check('the living-scene API is present', () => {
   const need = ['wake', 'isAwake', 'mass', 'applyLinearImpulse', 'setBodyOptions', 'setGravityWell', 'clearGravityWell',
-    'setGravityScale', 'contacts', 'setJointMotor', 'setBodyFilter'];
+    'setGravityScale', 'contacts', 'setJointMotor', 'setBodyFilter', 'setBullet', 'isBullet'];
   const missing = need.filter((k) => typeof M.ManifoldSim.prototype[k] !== 'function');
   return missing.length === 0 || fail('missing', missing);
 });
@@ -499,6 +499,32 @@ check('setBodyFilter moves a live box between lanes: it falls through, then coll
   const dx = Math.abs(row(s, top)[0] - row(s, low)[0]);
   s.delete();
   return (near(stacked, 0.45, 0.03) && near(fell, 0.75, 0.03) && dx > 0.28) || fail('lanes', { stacked, fell, dx });
+});
+
+check('a fast box is stopped by a thin KINEMATIC wall (movers are paired before contact)', () => {
+  const s = new M.ManifoldSim(0, 4);
+  const wall = s.addBody(KINEMATIC, BOX, 0, 0, 0, 0.07, 2.5);
+  s.setKinematic(wall, 0, 0, 0);
+  const b = s.addBody(DYNAMIC, BOX, -3, 0, 0, 0.15, 0.15);
+  s.setVelocity(b, 40, 0, 0);
+  let maxX = -9;
+  for (let i = 0; i < 60; i++) { s.step(1 / 60); maxX = Math.max(maxX, row(s, b)[0]); }
+  s.delete();
+  return maxX < -0.07 - 0.15 + 0.12 || fail('kinematic wall', { maxX });
+});
+
+check('setBullet: a fast spinning thin bar is stopped by a thin kinematic wall', () => {
+  const s = new M.ManifoldSim(0, 4);
+  const wall = s.addBody(KINEMATIC, BOX, 0, 0, 0, 0.07, 2.5);
+  s.setKinematic(wall, 0, 0, 0);
+  const bar = s.addBody(DYNAMIC, BOX, -3, 0, 0, 0.2, 0.05);
+  const was = s.isBullet(bar);
+  s.setBullet(bar, true);
+  s.setVelocity(bar, 80, 0, 25);
+  run(s, 60);
+  const x = row(s, bar)[0], now = s.isBullet(bar);
+  s.delete();
+  return (was === false && now === true && x < 0) || fail('bullet', { was, now, x });
 });
 
 check('setJointMotor drives a prismatic ram that stalls on a wall, then retracts', () => {

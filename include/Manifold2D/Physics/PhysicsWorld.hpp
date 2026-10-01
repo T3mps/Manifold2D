@@ -566,6 +566,15 @@ namespace Manifold2D
             // contact teardown, like Box2D's.
             void SetBodyFilter(BodyHandle h, std::uint32_t categoryBits, std::uint32_t maskBits);
 
+            // Make a live body a bullet, or stop it being one (b2Body_SetBullet). A
+            // dynamic bullet's step is swept against statics, kinematic bodies and
+            // non-bullet dynamic bodies, and clamped to the earliest time of impact
+            // (a kinematic bullet sweeps statics only). For bodies that move fast
+            // for a while -- a thrown object, a projectile -- not for every body:
+            // each bullet costs a shape cast per fixture per step.
+            void SetBullet(BodyHandle h, bool bullet);
+            [[nodiscard]] bool IsBullet(BodyHandle h) const noexcept;
+
             // Render-boundary lerp between prev and current step positions
             // (ports Body:drawPosition).
             [[nodiscard]] Vec2 DrawPosition(BodyHandle h, Real alpha) const noexcept;
@@ -1232,6 +1241,7 @@ namespace Manifold2D
             // with residency automatically.
             void UpdateMoverProxies(std::uint32_t b);
 
+
             // Add / remove a single fixture proxy in m_fixtureBroadphase.
             // AddFixtureProxy skips Static bodies (they are not mover proxies).
             void AddFixtureProxy(std::uint32_t fi);
@@ -1545,6 +1555,10 @@ namespace Manifold2D
             // Runs AFTER the solver commits dynamic positions and BEFORE events
             // (so contact events + island sleep see the clamped position).
             void BulletSweep();
+            // The earliest time of impact in (0, 1] for one bullet fixture swept from
+            // `start` along `delta` (1 = no hit). See the definition for the rules.
+            [[nodiscard]] Real CcdFixtureToi(std::uint32_t body, std::uint32_t fi,
+                                             const Transform& start, const Vec2& delta);
 
             // ---- query scratch (zero steady-state alloc) -------------------
             //
@@ -1563,6 +1577,7 @@ namespace Manifold2D
             // thread_local or caller-supplied scratch.
             mutable std::vector<Aabb2>         m_scratchSpans;
             mutable std::vector<std::uint32_t> m_scratchStatics;
+            std::vector<std::uint32_t>         m_ccdMoverScratch; // CcdFixtureToi's mover candidates
 
             // ---- persistent contact pool (collision-rebuild Phase 3, Task 2/4) --
             //

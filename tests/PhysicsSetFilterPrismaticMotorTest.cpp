@@ -48,6 +48,7 @@ namespace
         BodyDef d;
         d.type = BodyType::Dynamic;
         d.shape = MakeAabb(Real(0.5), Real(0.5));
+        d.fixedRotation = true; // a dynamic AABB shape is axis-aligned by definition
         d.density = Real(1);
         d.friction = Real(0.6);
         d.position = pos;
@@ -127,7 +128,7 @@ namespace
             BodyDef s; s.type = BodyType::Static; s.shape = MakeCircle(Real(0.05)); s.position = Vec2(Real(0), Real(0));
             s.maskBits = 0u;
             rail = w.AddBody(s);
-            BodyDef d; d.type = BodyType::Dynamic; d.shape = MakeAabb(Real(0.5), Real(0.5)); d.density = Real(1);
+            BodyDef d; d.type = BodyType::Dynamic; d.shape = MakeAabb(Real(0.5), Real(0.5)); d.fixedRotation = true; d.density = Real(1);
             d.position = Vec2(Real(0), Real(0)); d.maskBits = 0u; d.sleepThreshold = Real(0);
             box = w.AddBody(d);
             mass = w.GetBodyMass(box);
@@ -187,7 +188,7 @@ TEST_CASE("Prismatic motor: a ram stalls against a wall instead of forcing throu
     const BodyHandle frame = w.AddBody(s);
     BodyDef wall; wall.type = BodyType::Static; wall.shape = MakeAabb(Real(0.5), Real(2)); wall.position = Vec2(Real(2), Real(0));
     w.AddBody(wall);
-    BodyDef d; d.type = BodyType::Dynamic; d.shape = MakeAabb(Real(0.5), Real(0.5)); d.density = Real(1);
+    BodyDef d; d.type = BodyType::Dynamic; d.shape = MakeAabb(Real(0.5), Real(0.5)); d.fixedRotation = true; d.density = Real(1);
     d.position = Vec2(Real(0), Real(0)); d.sleepThreshold = Real(0);
     const BodyHandle ram = w.AddBody(d);
     JointDef j; j.kind = JointKind::Prismatic; j.a = frame; j.b = ram; j.axis = Vec2(Real(1), Real(0));

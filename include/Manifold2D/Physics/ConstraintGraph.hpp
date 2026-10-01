@@ -278,6 +278,7 @@ namespace Manifold2D
             // the body slot), which is the ForEachAwake visit order.
             struct NewPairRecord { std::uint32_t awakeIndex; std::uint32_t fiA; std::uint32_t fiB; };
             std::vector<NewPairRecord> m_newPairs;
+            std::vector<std::uint32_t> m_fastMoverScratch; // (b2) fast mover<->mover query output
 
             // Create-phase MT per-worker scratch (sized to WorkerCount() each step,
             // grow-only). Each worker uses ONLY its own [w] entry -> contention-free.

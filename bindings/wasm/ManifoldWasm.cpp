@@ -620,6 +620,23 @@ public:
         }
     }
 
+    // Make a live body a bullet or not (b2Body_SetBullet): a dynamic bullet's step
+    // is swept against statics, kinematic and non-bullet dynamic bodies and clamped
+    // to the time of impact. For things that move fast for a while -- a thrown body.
+    void setBullet(int slot, bool bullet)
+    {
+        BodyHandle h;
+        if (handle(slot, h))
+        {
+            m_world->SetBullet(h, bullet);
+        }
+    }
+    bool isBullet(int slot) const
+    {
+        BodyHandle h;
+        return handle(slot, h) && m_world->IsBullet(h);
+    }
+
     void setGravityScale(int slot, float scale)
     {
         BodyHandle h;
@@ -1034,6 +1051,8 @@ EMSCRIPTEN_BINDINGS(manifold)
         .function("clearGravityWell",    &ManifoldSim::clearGravityWell)
         .function("setGravityScale",     &ManifoldSim::setGravityScale)
         .function("setBodyFilter",       &ManifoldSim::setBodyFilter)
+        .function("setBullet",           &ManifoldSim::setBullet)
+        .function("isBullet",            &ManifoldSim::isBullet)
         .function("contacts",            &ManifoldSim::contacts);
     // embind gives every class_ a .delete() automatically -- contract section 3's
     // sim.delete() needs no registration.

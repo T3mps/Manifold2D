@@ -872,6 +872,50 @@ namespace Manifold2D
                 TryCreateContact(w, rec.fiA, rec.fiB);
             }
 
+            // (b2) FAST mover<->mover: the static path's look-ahead, for movers. The
+            //      broadphase pairs in (a) come from the boxes movers registered at
+            //      their last commit, so a body closing on a KINEMATIC or DYNAMIC body
+            //      faster than the tree margin was paired only once it was inside: it
+            //      sank in (pushed out at contactPushMaxVelocity over several steps)
+            //      or, against a thin one, crossed its middle and came out the far
+            //      side. Here every awake dynamic body whose reach this step (|v| dt)
+            //      exceeds the margin queries the mover broadphase with its box padded
+            //      by that reach -- the pad its static query uses above -- and pairs
+            //      with what it finds, so the speculative margin stops it at a mover
+            //      as it does at a static. (Box2D v2.4 predicts the same motion with
+            //      b2DynamicTree::MoveProxy's displacement.) The stored proxies are
+            //      untouched, so the pair set, contact persistence and the choice of
+            //      broadphase are unaffected (QueryAABB narrows on tight boxes in every
+            //      implementation); serial and in awake order, so creation order is
+            //      deterministic. Slow bodies (the common case) skip it.
+            if (moveDt > Real(0))
+            {
+                IBroadphase* bp = w.m_fixtureBroadphase.get();
+                for (const std::uint32_t i : w.AwakeBodies())
+                {
+                    if (w.m_sensor[i] != 0) { continue; }
+                    if (i >= w.m_bodyFixtures.size() || w.m_bodyFixtures[i].empty()) { continue; }
+                    const Real speedSq = w.m_velX[i] * w.m_velX[i] + w.m_velY[i] * w.m_velY[i];
+                    const Real reach = std::sqrt(speedSq) * moveDt;
+                    if (!(reach > DynamicTree::kMargin)) { continue; }
+                    const Aabb2 box = w.SlotAabb(i);
+                    Aabb2 query;
+                    query.min = Vec2(box.min.x - reach, box.min.y - reach);
+                    query.max = Vec2(box.max.x + reach, box.max.y + reach);
+                    m_fastMoverScratch.clear();
+                    bp->QueryAABB(query, m_fastMoverScratch);
+                    for (const std::uint32_t fj : m_fastMoverScratch)
+                    {
+                        if (fj >= w.m_fxCount || w.m_fxGen[fj] == 0u || w.m_fxBody[fj] == i) { continue; }
+                        for (const std::uint32_t fiA : w.m_bodyFixtures[i])
+                        {
+                            if (fiA >= w.m_fxCount || w.m_fxGen[fiA] == 0u || w.m_fxSensor[fiA] != 0u) { continue; }
+                            TryCreateContact(w, fiA, fj); // filters, orientation, de-duplication
+                        }
+                    }
+                }
+            }
+
             // (c) KINEMATIC<->static-BODY (Phase 4, Task 1): event-relevant but NOT
             //     solver-relevant. Static bodies are NOT in the mover broadphase and
             //     the dynamic-driven static-candidate loop above only covers DYNAMIC
