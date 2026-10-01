@@ -521,9 +521,11 @@ public:
         return true;
     }
 
-    // Live motor control for a wheel or motor joint: speed in rad/s, maxTorque
-    // > 0 enables the motor at that torque, 0 lets it coast. false for any
-    // other joint kind or a dead id.
+    // Live motor control for a wheel, motor or prismatic joint. Wheel/motor:
+    // speed in rad/s, maxTorque in N*m. Prismatic: speed in m/s along the
+    // axis, maxTorque is the force limit in N (a press, piston or gate that
+    // stalls against what it cannot move). > 0 enables the motor at that
+    // limit, 0 lets it coast. false for any other joint kind or a dead id.
     bool setJointMotor(int id, float speed, float maxTorque)
     {
         Joint* j = joint(id);
@@ -540,6 +542,12 @@ public:
         {
             mj->SetMotorSpeed(sp);
             mj->SetMaxMotorTorque(tq);
+        }
+        else if (auto* pj = dynamic_cast<PrismaticJoint*>(j))
+        {
+            pj->EnableMotor(tq > Real(0));
+            pj->SetMotorSpeed(sp);
+            pj->SetMaxMotorForce(tq);
         }
         else
         {
@@ -600,6 +608,18 @@ public:
         off.enabled = false;
         m_world->SetGravityWell(off);
     }
+    // Change a live body's collision filter (every fixture), e.g. a walker
+    // stepping into another depth lane. Its contacts are rebuilt against the
+    // new filter (PhysicsWorld::SetBodyFilter, b2Shape_SetFilter's recipe).
+    void setBodyFilter(int slot, std::uint32_t category, std::uint32_t mask)
+    {
+        BodyHandle h;
+        if (handle(slot, h))
+        {
+            m_world->SetBodyFilter(h, category, mask);
+        }
+    }
+
     void setGravityScale(int slot, float scale)
     {
         BodyHandle h;
@@ -1013,6 +1033,7 @@ EMSCRIPTEN_BINDINGS(manifold)
         .function("setGravityWell",      &ManifoldSim::setGravityWell)
         .function("clearGravityWell",    &ManifoldSim::clearGravityWell)
         .function("setGravityScale",     &ManifoldSim::setGravityScale)
+        .function("setBodyFilter",       &ManifoldSim::setBodyFilter)
         .function("contacts",            &ManifoldSim::contacts);
     // embind gives every class_ a .delete() automatically -- contract section 3's
     // sim.delete() needs no registration.

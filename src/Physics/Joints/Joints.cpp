@@ -168,10 +168,31 @@ namespace Manifold2D
             m_angBias = beta * da;
             const Real k = JointMath::InvInertia(w, m_ia) + JointMath::InvInertia(w, m_ib);
             m_angMass = k > Real(0) ? Real(1) / k : Real(0);
+
+            // The motor acts along the axis through the same origins as the
+            // perpendicular constraint, so its effective mass is the same.
+            m_maxMotorImpulse = m_maxMotorForce * dt;
         }
 
         void PrismaticJoint::SolveVelocity(PhysicsWorld& w)
         {
+            // ---- motor (drive the slide; b2PrismaticJoint's motor) ----------
+            // Solved first, like Box2D, so the constraints below have the last
+            // word. The accumulated impulse is clamped to maxMotorForce * dt per
+            // sub-step: against a load it cannot move, the motor stalls.
+            if (m_enableMotor && m_mass > Real(0) && m_maxMotorImpulse > Real(0))
+            {
+                const Vec2 va = JointMath::Vat(w, m_ia, Real(0), Real(0));
+                const Vec2 vb = JointMath::Vat(w, m_ib, Real(0), Real(0));
+                const Real cdot = (vb.x - va.x) * m_axis.x + (vb.y - va.y) * m_axis.y - m_motorSpeed;
+                Real impulse = -m_mass * cdot;
+                const Real old = m_motorImpulse;
+                m_motorImpulse = std::clamp(old + impulse, -m_maxMotorImpulse, m_maxMotorImpulse);
+                impulse = m_motorImpulse - old;
+                JointMath::ApplyAt(w, m_ia, -m_axis.x * impulse, -m_axis.y * impulse, Real(0), Real(0));
+                JointMath::ApplyAt(w, m_ib, m_axis.x * impulse, m_axis.y * impulse, Real(0), Real(0));
+            }
+
             const Vec2 va = JointMath::Vat(w, m_ia, Real(0), Real(0));
             const Vec2 vb = JointMath::Vat(w, m_ib, Real(0), Real(0));
             const Real vp = (vb.x - va.x) * m_px + (vb.y - va.y) * m_py;
@@ -451,7 +472,8 @@ namespace Manifold2D
                 const Real refAngle =
                     (w.IsValid(def.b) ? w.GetAngle(def.b) : Real(0)) -
                     (w.IsValid(def.a) ? w.GetAngle(def.a) : Real(0));
-                return std::make_unique<PrismaticJoint>(def.a, def.b, axis, orig, refAngle);
+                return std::make_unique<PrismaticJoint>(def.a, def.b, axis, orig, refAngle,
+                                                        def.enableMotor, def.motorSpeed, def.maxMotorForce);
             }
             case JointKind::Mouse:
             {

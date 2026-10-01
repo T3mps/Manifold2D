@@ -557,6 +557,15 @@ namespace Manifold2D
             void SetGravityScale(BodyHandle h, Real scale);
             [[nodiscard]] Real GravityScale(BodyHandle h) const noexcept;
 
+            // Change the collision filter of every fixture on a live body
+            // (b2Shape_SetFilter): each fixture's contacts are destroyed and its
+            // broadphase proxy re-inserted, so pairs the new filter rejects stop
+            // at once and pairs it admits are found on the next Step (static
+            // pairs are re-queried every step for awake bodies). The body and
+            // the bodies it touched are woken. Not for every tick: it costs a
+            // contact teardown, like Box2D's.
+            void SetBodyFilter(BodyHandle h, std::uint32_t categoryBits, std::uint32_t maskBits);
+
             // Render-boundary lerp between prev and current step positions
             // (ports Body:drawPosition).
             [[nodiscard]] Vec2 DrawPosition(BodyHandle h, Real alpha) const noexcept;

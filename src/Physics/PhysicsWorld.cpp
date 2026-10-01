@@ -1692,6 +1692,49 @@ namespace Manifold2D
             }
         }
 
+        void PhysicsWorld::SetBodyFilter(BodyHandle h, std::uint32_t categoryBits, std::uint32_t maskBits)
+        {
+            if (!IsValid(h))
+            {
+                MOSAIC_LOG_WARN("operation on a stale/invalid BodyHandle ignored");
+                return;
+            }
+            const std::uint32_t b = h.index;
+            if (b >= m_bodyFixtures.size())
+            {
+                return;
+            }
+            const bool isStatic = static_cast<BodyType>(m_btype[b]) == BodyType::Static;
+            bool changed = false;
+            for (const std::uint32_t fi : m_bodyFixtures[b])
+            {
+                if (fi >= m_fxCount || m_fxGen[fi] == 0u)
+                {
+                    continue;
+                }
+                if (m_fxFilterCat[fi] == categoryBits && m_fxFilterMask[fi] == maskBits)
+                {
+                    continue;
+                }
+                m_fxFilterCat[fi]  = categoryBits;
+                m_fxFilterMask[fi] = maskBits;
+                changed = true;
+                // b2ResetProxy: drop the fixture's contacts (waking what they
+                // touched), then re-insert its mover proxy so the pair set is
+                // rebuilt against the new filter.
+                m_graph.DestroyContactsForFixture(*this, fi);
+                if (!isStatic)
+                {
+                    RemoveFixtureProxy(fi);
+                    AddFixtureProxy(fi);
+                }
+            }
+            if (changed && static_cast<BodyType>(m_btype[b]) == BodyType::Dynamic)
+            {
+                Wake(h);
+            }
+        }
+
         Real PhysicsWorld::GravityScale(BodyHandle h) const noexcept
         {
             return IsValid(h) ? m_gravityScale[h.index] : Real(1);

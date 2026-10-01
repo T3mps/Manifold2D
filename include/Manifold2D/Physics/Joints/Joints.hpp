@@ -111,12 +111,29 @@ namespace Manifold2D
         class PrismaticJoint final : public Joint
         {
         public:
-            PrismaticJoint(BodyHandle a, BodyHandle b, Vec2 axis, Vec2 origin, Real refAngle)
-                : m_hA(a), m_hB(b), m_axis(axis), m_orig(origin), m_refAngle(refAngle)
+            PrismaticJoint(BodyHandle a, BodyHandle b, Vec2 axis, Vec2 origin, Real refAngle,
+                           bool enableMotor = false, Real motorSpeed = Real(0), Real maxMotorForce = Real(0))
+                : m_hA(a), m_hB(b), m_axis(axis), m_orig(origin), m_refAngle(refAngle),
+                  m_enableMotor(enableMotor), m_motorSpeed(motorSpeed),
+                  m_maxMotorForce(maxMotorForce > Real(0) ? maxMotorForce : Real(0))
             {
             }
             void Prepare(PhysicsWorld& w, Real dt) override;
             void SolveVelocity(PhysicsWorld& w) override;
+            // Each sub-step gets the full force budget (see Joint::BeginSubstep).
+            void BeginSubstep() noexcept override { m_motorImpulse = Real(0); }
+
+            // The translation motor (b2PrismaticJoint's): drives B's speed along
+            // the axis, relative to A, toward motorSpeed (m/s) with at most
+            // maxMotorForce (N). A force-limited motor stalls against a load it
+            // cannot move instead of forcing through it -- the safe way to build
+            // a press, a piston or a gate.
+            void EnableMotor(bool on) noexcept { m_enableMotor = on; }
+            void SetMotorSpeed(Real speed) noexcept { m_motorSpeed = speed; }
+            void SetMaxMotorForce(Real force) noexcept { m_maxMotorForce = force > Real(0) ? force : Real(0); }
+            [[nodiscard]] bool IsMotorEnabled() const noexcept { return m_enableMotor; }
+            [[nodiscard]] Real MotorSpeed() const noexcept { return m_motorSpeed; }
+            [[nodiscard]] Real MaxMotorForce() const noexcept { return m_maxMotorForce; }
             [[nodiscard]] std::uint32_t BodyA() const noexcept override { return m_ia; }
             [[nodiscard]] std::uint32_t BodyB() const noexcept override { return m_ib; }
             [[nodiscard]] BodyHandle HandleA() const noexcept override { return m_hA; }
@@ -134,6 +151,12 @@ namespace Manifold2D
             Real m_mass = Real(0);
             Real m_angBias = Real(0);
             Real m_angMass = Real(0);
+            // Motor.
+            bool m_enableMotor     = false;
+            Real m_motorSpeed      = Real(0);
+            Real m_maxMotorForce   = Real(0);
+            Real m_maxMotorImpulse = Real(0); // maxMotorForce * dt
+            Real m_motorImpulse    = Real(0); // accumulated this sub-step
         };
 
         // ================================================================

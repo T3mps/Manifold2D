@@ -343,7 +343,7 @@ check('the existing hero API is unchanged', () => {
 
 check('the living-scene API is present', () => {
   const need = ['wake', 'isAwake', 'mass', 'applyLinearImpulse', 'setBodyOptions', 'setGravityWell', 'clearGravityWell',
-    'setGravityScale', 'contacts', 'setJointMotor'];
+    'setGravityScale', 'contacts', 'setJointMotor', 'setBodyFilter'];
   const missing = need.filter((k) => typeof M.ManifoldSim.prototype[k] !== 'function');
   return missing.length === 0 || fail('missing', missing);
 });
@@ -481,6 +481,40 @@ check('setJointMotor retargets a live wheel motor: the car stops, then reverses'
   const x2 = row(s, chassis)[0];
   s.delete();
   return (x1 > 0.5 && x2 < x1 - 0.5 && ok[0] && ok[1] && ok[2] === false) || fail('reverse', { x1, x2, ok });
+});
+
+check('setBodyFilter moves a live box between lanes: it falls through, then collides again', () => {
+  const s = world();
+  s.setFilter(2, 1 | 2);
+  const low = s.addBody(DYNAMIC, BOX, 0, 0.75, 0, 0.15, 0.15);
+  const top = s.addBody(DYNAMIC, BOX, 0, 0.44, 0, 0.15, 0.15);
+  s.setFilter(1, 0xffffffff);
+  run(s, 60);
+  const stacked = row(s, top)[1];
+  s.setBodyFilter(top, 4, 1 | 4);                                 // the other lane: through `low`
+  run(s, 60);
+  const fell = row(s, top)[1];
+  s.setBodyFilter(top, 2, 1 | 2);                                 // back: the overlap pushes them apart
+  run(s, 120);
+  const dx = Math.abs(row(s, top)[0] - row(s, low)[0]);
+  s.delete();
+  return (near(stacked, 0.45, 0.03) && near(fell, 0.75, 0.03) && dx > 0.28) || fail('lanes', { stacked, fell, dx });
+});
+
+check('setJointMotor drives a prismatic ram that stalls on a wall, then retracts', () => {
+  const s = new M.ManifoldSim(0, 4);
+  const frame = s.addBody(STATIC, CIRCLE, -2, 0, 0, 0.05, 0);
+  s.addBody(STATIC, BOX, 1.5, 0, 0, 0.25, 1);                     // wall face at x = 1.25
+  const ram = s.addBody(DYNAMIC, BOX, 0, 0, 0, 0.25, 0.25);
+  const id = s.addPrismaticJoint(frame, ram, 1, 0);
+  const on = s.setJointMotor(id, 3, 20);
+  run(s, 120);
+  const stall = row(s, ram);
+  s.setJointMotor(id, -1.5, 20);
+  run(s, 30);
+  const back = row(s, ram);
+  s.delete();
+  return (on && near(stall[0], 1.0, 0.04) && Math.abs(stall[3]) < 0.05 && near(back[3], -1.5, 0.05) && Math.abs(back[1]) < 0.01) || fail('ram', { on, stall: [...stall], back: [...back] });
 });
 
 check('determinism under a gravity well: two identical worlds stay bit-identical', () => {

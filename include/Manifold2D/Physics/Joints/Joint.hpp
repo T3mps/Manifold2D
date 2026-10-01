@@ -108,10 +108,11 @@ namespace Manifold2D
             Real frequencyHz  = Real(4);
             Real dampingRatio = Real(0.7);
 
-            // Wheel / Motor rotation drive.
-            bool enableMotor    = false;     // Wheel: drive the wheel's spin
-            Real motorSpeed     = Real(0);   // target relative angular velocity (rad/s)
+            // Wheel / Motor rotation drive; Prismatic translation drive.
+            bool enableMotor    = false;     // Wheel: drive the wheel's spin; Prismatic: drive the slide
+            Real motorSpeed     = Real(0);   // Wheel/Motor: rad/s; Prismatic: m/s along the axis
             Real maxMotorTorque = Real(0);    // impulse clamp magnitude (torque * dt)
+            Real maxMotorForce  = Real(0);    // Prismatic: the motor's force limit (N)
         };
 
         // ----------------------------------------------------------------
