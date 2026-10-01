@@ -1,0 +1,344 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ManifoldSim scene API smoke test</title>
+<pre id="out">running</pre>
+<script type="module">
+// Browser smoke test for ManifoldSim's scene surface (bindings/wasm/ManifoldWasm.cpp).
+// Each case builds its own world, steps it, and asserts on bodies(); results
+// render into #out and land on window.__results for an automated runner.
+// +y is down; the shared ground's top face is at y = 0.9.
+//
+// Run: build (scripts/build-wasm.sh), copy out/manifold.js + out/manifold.wasm
+// next to this file, serve the folder over HTTP (e.g. python -m http.server)
+// and open scene-api.html. Every line should read PASS.
+const results = [];
+const check = (name, fn) => {
+  try { const r = fn(); results.push({ name, ok: r === true, detail: r === true ? '' : String(r) }); }
+  catch (e) { results.push({ name, ok: false, detail: String(e && e.message || e) }); }
+};
+const STATIC = 0, KINEMATIC = 1, DYNAMIC = 2;
+const CIRCLE = 0, BOX = 1, CAPSULE = 2, NGON = 3;
+
+const M = await (await import('./manifold.js')).default({ locateFile: (f) => './' + f });
+const world = () => { const s = new M.ManifoldSim(10, 4); s.addStaticBox(0, 1.0, 5, 0.1, 0); return s; };
+const run = (s, n) => { for (let i = 0; i < n; i++) s.step(1 / 60); };
+const row = (s, slot) => Array.from(s.bodies().slice(slot * 6, slot * 6 + 6));
+const near = (a, b, tol) => Math.abs(a - b) <= tol;
+const fail = (msg, v) => `${msg}: ${JSON.stringify(v)}`;
+
+check('the scene API is present', () => {
+  const need = ['setMaterial', 'setFilter', 'setFixedRotation', 'addBody', 'addBodyPoly', 'addFixture', 'addFixturePoly',
+    'removeBody', 'isAlive', 'setTransform', 'setVelocity', 'applyImpulse', 'setKinematic',
+    'addDistanceJoint', 'addRevoluteJoint', 'addWeldJoint', 'addPrismaticJoint', 'addWheelJoint', 'addMotorJoint',
+    'addMouseJoint', 'setMouseTarget', 'removeJoint', 'jointCount'];
+  const missing = need.filter((k) => typeof M.ManifoldSim.prototype[k] !== 'function');
+  return missing.length === 0 || fail('missing', missing);
+});
+
+check('addBody: a dynamic circle, box, capsule and ngon each come to rest on the ground', () => {
+  const s = world();
+  const c = s.addBody(DYNAMIC, CIRCLE, -2, 0, 0, 0.1, 0);
+  const b = s.addBody(DYNAMIC, BOX, -1, 0, 0, 0.1, 0.05);
+  const k = s.addBody(DYNAMIC, CAPSULE, 0, 0, 0, 0.15, 0.05);
+  const n = s.addBody(DYNAMIC, NGON, 1, 0, 0, 0.1, 6);
+  run(s, 180);
+  const ys = [c, b, k, n].map((i) => row(s, i)[1]);
+  const want = [0.8, 0.85, 0.85, 0.9 - 0.1 * Math.cos(Math.PI / 6)];
+  const ok = ys.every((y, i) => near(y, want[i], 0.02));
+  s.delete();
+  return ok || fail('rest heights', ys);
+});
+
+check('addBody: a static body stays put and a kinematic body moves at its set velocity', () => {
+  const s = world();
+  const st = s.addBody(STATIC, BOX, 0, 0, 0, 0.2, 0.2);
+  const kn = s.addBody(KINEMATIC, BOX, 0, -1, 0, 0.2, 0.05);
+  s.setKinematic(kn, 1, 0, 2);
+  run(s, 60);
+  const [sx, sy] = row(s, st), [kx, , ka] = row(s, kn);
+  s.delete();
+  return (near(sx, 0, 1e-6) && near(sy, 0, 1e-6) && near(kx, 1, 0.02) && near(ka, 2, 0.02)) || fail('static/kinematic', { sx, sy, kx, ka });
+});
+
+check('addBodyPoly: an arbitrary convex polygon falls and rests', () => {
+  const s = world();
+  const p = s.addBodyPoly(DYNAMIC, 0, 0, 0, [-0.2, 0.1, 0.2, 0.1, 0.1, -0.1, -0.1, -0.1]);
+  run(s, 180);
+  const y = row(s, p)[1];
+  s.delete();
+  return (p >= 0 && y > 0.6 && y < 0.9) || fail('poly', { p, y });
+});
+
+check('addBodyPoly: too few, collinear, concave or odd-length vertex lists are refused, not a crash', () => {
+  const s = world();
+  const r = [
+    s.addBodyPoly(DYNAMIC, 0, 0, 0, [0, 0, 1, 0]),
+    s.addBodyPoly(DYNAMIC, 0, 0, 0, [0, 0, 0.5, 0, 1, 0]),
+    s.addBodyPoly(DYNAMIC, 0, 0, 0, [0, 0, 1, 0, 0.5, 0.2, 1, 1, 0, 1]),
+    s.addBodyPoly(DYNAMIC, 0, 0, 0, [0, 0, 1, 0, 1])
+  ];
+  s.delete();
+  return r.every((v) => v === -1) || fail('refused', r);
+});
+
+check('setMaterial: restitution 0.9 bounces far higher than 0', () => {
+  const peak = (e) => {
+    const s = world();
+    s.setMaterial(1, 0.4, e, 0);
+    const c = s.addBody(DYNAMIC, CIRCLE, 0, -1, 0, 0.1, 0);
+    let landed = false, top = 9;
+    for (let i = 0; i < 240; i++) {
+      s.step(1 / 60);
+      const [, y, , , vy] = row(s, c);
+      if (!landed && vy < 0) landed = true;
+      if (landed) top = Math.min(top, y);
+    }
+    s.delete();
+    return top;
+  };
+  const bouncy = peak(0.9), dead = peak(0);
+  return (bouncy < 0.2 && dead > 0.7) || fail('peaks', { bouncy, dead });
+});
+
+check('setMaterial: density scales mass (an equal impulse moves a dense body less)', () => {
+  const speed = (d) => {
+    const s = new M.ManifoldSim(0, 4);
+    s.setMaterial(d, 0.4, 0, 0);
+    const b = s.addBody(DYNAMIC, BOX, 0, 0, 0, 0.1, 0.1);
+    s.applyImpulse(b, 1, 0, 0, 0);
+    s.step(1 / 60);
+    const vx = row(s, b)[3];
+    s.delete();
+    return vx;
+  };
+  const light = speed(1), heavy = speed(4);
+  return near(light / heavy, 4, 0.05) || fail('vx ratio', { light, heavy });
+});
+
+check('setFilter: bodies in non-overlapping categories pass through each other', () => {
+  const s = world();
+  s.setFilter(2, 0xffffffff & ~2);
+  const a = s.addBody(DYNAMIC, BOX, 0, 0.5, 0, 0.2, 0.2);
+  const b = s.addBody(DYNAMIC, BOX, 0, -0.5, 0, 0.2, 0.2);
+  run(s, 180);
+  const ya = row(s, a)[1], yb = row(s, b)[1];
+  s.delete();
+  return (near(ya, 0.7, 0.02) && near(yb, 0.7, 0.02)) || fail('both on the ground', { ya, yb });
+});
+
+check('setFixedRotation: a fixed-rotation box hit off-centre does not spin', () => {
+  const s = new M.ManifoldSim(0, 4);
+  s.setFixedRotation(true);
+  const b = s.addBody(DYNAMIC, BOX, 0, 0, 0, 0.1, 0.3);
+  s.setFixedRotation(false);
+  const f = s.addBody(DYNAMIC, BOX, 2, 0, 0, 0.1, 0.3);
+  s.applyImpulse(b, 1, 0, 0, -0.3);
+  s.applyImpulse(f, 1, 0, 2, -0.3);
+  s.step(1 / 60);
+  const wb = row(s, b)[5], wf = row(s, f)[5];
+  s.delete();
+  return (wb === 0 && Math.abs(wf) > 0.1) || fail('spins', { wb, wf });
+});
+
+check('addFixture: a compound body (a deck on two offset wheels, a diamond on top) rests on its lowest fixtures', () => {
+  const s = world();
+  const b = s.addBody(DYNAMIC, BOX, 0, 0, 0, 0.3, 0.05);
+  const f1 = s.addFixture(b, CIRCLE, -0.2, 0.2, 0, 0.1, 0);
+  const f2 = s.addFixture(b, CIRCLE, 0.2, 0.2, 0, 0.1, 0);
+  const f3 = s.addFixturePoly(b, 0, -0.15, 0, [0, -0.1, 0.1, 0, 0, 0.1, -0.1, 0]);
+  run(s, 240);
+  const [, y, a] = row(s, b);
+  s.delete();
+  return (f1 >= 0 && f2 >= 0 && f3 >= 0 && near(y, 0.6, 0.03) && near(a, 0, 0.05)) || fail('compound', { f1, f2, f3, y, a });
+});
+
+check('removeBody: the slot dies, others are untouched, and a removed floor stops supporting', () => {
+  const s = world();
+  const plank = s.addBody(STATIC, BOX, 0, 0, 0, 1, 0.05);
+  const box = s.addBody(DYNAMIC, BOX, 0, -0.3, 0, 0.1, 0.1);
+  run(s, 60);
+  const restedAt = row(s, box)[1];
+  const removed = s.removeBody(plank);
+  const again = s.removeBody(plank);
+  run(s, 120);
+  const fellTo = row(s, box)[1];
+  const alive = [s.isAlive(plank), s.isAlive(box)];
+  s.delete();
+  return (removed === true && again === false && near(restedAt, -0.15, 0.02) && near(fellTo, 0.8, 0.02) && !alive[0] && alive[1])
+    || fail('removal', { removed, again, restedAt, fellTo, alive });
+});
+
+check('removeBody: a freed slot is reused and the new body is independent', () => {
+  const s = world();
+  const a = s.addBody(DYNAMIC, CIRCLE, 0, 0, 0, 0.1, 0);
+  s.removeBody(a);
+  const b = s.addBody(DYNAMIC, CIRCLE, 1, 0, 0, 0.1, 0);
+  run(s, 1);
+  const r = row(s, b);
+  s.delete();
+  return (b === a && near(r[0], 1, 1e-4)) || fail('reuse', { a, b, x: r[0] });
+});
+
+check('setTransform teleports, setVelocity sets linear and angular velocity', () => {
+  const s = new M.ManifoldSim(0, 4);
+  const b = s.addBody(DYNAMIC, BOX, 0, 0, 0, 0.1, 0.1);
+  s.setTransform(b, 3, -2, 1);
+  const [x, y, a] = row(s, b);
+  s.setVelocity(b, 2, 0, 1);
+  run(s, 60);
+  const [x2, , a2] = row(s, b);
+  s.delete();
+  return (near(x, 3, 1e-5) && near(y, -2, 1e-5) && near(a, 1, 1e-5) && near(x2, 5, 0.02) && near(a2, 2, 0.02)) || fail('transform', { x, y, a, x2, a2 });
+});
+
+check('addRevoluteJoint: a pendulum keeps its length from a static pivot', () => {
+  const s = new M.ManifoldSim(10, 4);
+  const pivot = s.addBody(STATIC, CIRCLE, 0, 0, 0, 0.02, 0);
+  const bob = s.addBody(DYNAMIC, CIRCLE, 1, 0, 0, 0.05, 0);
+  const id = s.addRevoluteJoint(pivot, bob, 0, 0);
+  let worst = 0;
+  for (let i = 0; i < 240; i++) { s.step(1 / 60); const [x, y] = row(s, bob); worst = Math.max(worst, Math.abs(Math.hypot(x, y) - 1)); }
+  const [, y] = row(s, bob);
+  s.delete();
+  return (id >= 0 && worst < 0.03 && y > 0.3) || fail('pendulum', { id, worst, y });
+});
+
+check('addDistanceJoint: a hanging rope segment keeps its length', () => {
+  const s = new M.ManifoldSim(10, 4);
+  const hook = s.addBody(STATIC, CIRCLE, 0, 0, 0, 0.02, 0);
+  const load = s.addBody(DYNAMIC, BOX, 0.5, 0.5, 0, 0.1, 0.1);
+  const id = s.addDistanceJoint(hook, load, 0);
+  run(s, 240);
+  const [x, y] = row(s, load);
+  s.delete();
+  return (id >= 0 && near(Math.hypot(x, y), Math.SQRT1_2, 0.03)) || fail('rope', { id, d: Math.hypot(x, y) });
+});
+
+check('addWeldJoint: two welded boxes fall as one rigid piece', () => {
+  const s = world();
+  const a = s.addBody(DYNAMIC, BOX, 0, 0, 0, 0.1, 0.1);
+  const b = s.addBody(DYNAMIC, BOX, 0.2, 0, 0, 0.1, 0.1);
+  const id = s.addWeldJoint(a, b, 0.1, 0);
+  run(s, 180);
+  const ra = row(s, a), rb = row(s, b);
+  s.delete();
+  return (id >= 0 && near(Math.hypot(rb[0] - ra[0], rb[1] - ra[1]), 0.2, 0.02) && near(ra[2], rb[2], 0.02)) || fail('weld', { ra, rb });
+});
+
+check('addPrismaticJoint: an elevator car slides only along its vertical axis', () => {
+  const s = new M.ManifoldSim(10, 4);
+  const shaft = s.addBody(STATIC, BOX, 0, -2, 0, 0.05, 0.05);
+  const car = s.addBody(DYNAMIC, BOX, 0, -1, 0, 0.2, 0.1);
+  const id = s.addPrismaticJoint(shaft, car, 0, 1);
+  s.applyImpulse(car, 1, 0, 0.2, -1);
+  run(s, 60);
+  const [x, y, a] = row(s, car);
+  s.delete();
+  return (id >= 0 && near(x, 0, 0.02) && near(a, 0, 0.02) && y > -0.6) || fail('prismatic', { x, y, a });
+});
+
+check('addWheelJoint: a two-wheel car with a motor drives in +x', () => {
+  const s = world();
+  const chassis = s.addBody(DYNAMIC, BOX, 0, 0.6, 0, 0.4, 0.08);
+  const w1 = s.addBody(DYNAMIC, CIRCLE, -0.3, 0.78, 0, 0.12, 0);
+  const w2 = s.addBody(DYNAMIC, CIRCLE, 0.3, 0.78, 0, 0.12, 0);
+  const j1 = s.addWheelJoint(chassis, w1, -0.3, 0.78, 0, 1, 5, 0.7, 8, 20);
+  const j2 = s.addWheelJoint(chassis, w2, 0.3, 0.78, 0, 1, 5, 0.7, 8, 20);
+  run(s, 180);
+  const [x, y, a] = row(s, chassis);
+  s.delete();
+  return (j1 >= 0 && j2 >= 0 && x > 1.0 && Math.abs(a) < 0.3 && y < 0.8) || fail('car', { x, y, a });
+});
+
+check('addMotorJoint: drives the relative spin of a free wheel on a fixed hub', () => {
+  const s = new M.ManifoldSim(0, 4);
+  const hub = s.addBody(STATIC, CIRCLE, 0, 0, 0, 0.02, 0);
+  const wheel = s.addBody(DYNAMIC, CIRCLE, 0, 0, 0, 0.3, 0);
+  s.addRevoluteJoint(hub, wheel, 0, 0);
+  const id = s.addMotorJoint(hub, wheel, 3, 50);
+  run(s, 120);
+  const w = row(s, wheel)[5];
+  s.delete();
+  return (id >= 0 && near(w, 3, 0.1)) || fail('motor', { id, w });
+});
+
+check('addMouseJoint + setMouseTarget: a body is dragged toward a moving target', () => {
+  const s = new M.ManifoldSim(10, 4);
+  const b = s.addBody(DYNAMIC, BOX, 0, 0, 0, 0.1, 0.1);
+  const id = s.addMouseJoint(b, 0, 0, 1000);
+  const moved = s.setMouseTarget(id, 1, -1);
+  run(s, 120);
+  const [x, y] = row(s, b);
+  s.delete();
+  return (id >= 0 && moved === true && near(x, 1, 0.05) && near(y, -1, 0.1)) || fail('mouse', { id, moved, x, y });
+});
+
+check('removeJoint: a released pendulum falls; ids are not reused for a live joint', () => {
+  const s = new M.ManifoldSim(10, 4);
+  const pivot = s.addBody(STATIC, CIRCLE, 0, 0, 0, 0.02, 0);
+  const bob = s.addBody(DYNAMIC, CIRCLE, 0, 1, 0, 0.05, 0);
+  const id = s.addRevoluteJoint(pivot, bob, 0, 0);
+  run(s, 30);
+  const before = s.jointCount();
+  const ok1 = s.removeJoint(id), ok2 = s.removeJoint(id);
+  run(s, 60);
+  const y = row(s, bob)[1];
+  const after = s.jointCount();
+  s.delete();
+  return (before === 1 && after === 0 && ok1 === true && ok2 === false && y > 2) || fail('release', { before, after, ok1, ok2, y });
+});
+
+check('removeBody of a jointed body removes its joints; their ids then refuse calls', () => {
+  const s = new M.ManifoldSim(10, 4);
+  const a = s.addBody(DYNAMIC, BOX, 0, 0, 0, 0.1, 0.1);
+  const id = s.addMouseJoint(a, 0, 0, 100);
+  s.removeBody(a);
+  const count = s.jointCount();
+  const moved = s.setMouseTarget(id, 1, 1);
+  const removed = s.removeJoint(id);
+  run(s, 10);
+  s.delete();
+  return (count === 0 && moved === false && removed === false) || fail('cleanup', { count, moved, removed });
+});
+
+check('bad slots and ids are refused without aborting the module', () => {
+  const s = world();
+  const r = [s.removeBody(999), s.isAlive(999), s.addRevoluteJoint(999, 0, 0, 0), s.addFixture(999, BOX, 0, 0, 0, 0.1, 0.1),
+    s.addBody(DYNAMIC, CIRCLE, 0, 0, 0, 0, 0), s.addBody(DYNAMIC, 9, 0, 0, 0, 0.1, 0.1), s.addBody(DYNAMIC, NGON, 0, 0, 0, 0.1, 2)];
+  s.setTransform(999, 0, 0, 0); s.setVelocity(999, 0, 0, 0); s.applyImpulse(999, 0, 0, 0, 0); s.setKinematic(999, 0, 0, 0);
+  run(s, 2);
+  s.delete();
+  return JSON.stringify(r) === JSON.stringify([false, false, -1, -1, -1, -1, -1]) || fail('refusals', r);
+});
+
+check('determinism: two identical scenes stay bit-identical over 600 steps', () => {
+  const scene = () => {
+    const s = world();
+    s.setMaterial(1, 0.5, 0.3, 0);
+    for (let i = 0; i < 30; i++) s.addBody(DYNAMIC, i % 4, (i % 6) * 0.25 - 0.6, -0.4 * Math.floor(i / 6), i * 0.3, 0.08, i % 4 === 3 ? 5 : 0.06);
+    const car = s.addBody(DYNAMIC, BOX, -2, 0.6, 0, 0.3, 0.06);
+    const w = s.addBody(DYNAMIC, CIRCLE, -2, 0.78, 0, 0.1, 0);
+    s.addWheelJoint(car, w, -2, 0.78, 0, 1, 5, 0.7, 6, 10);
+    run(s, 600);
+    const out = s.bodies().slice();
+    s.delete();
+    return out;
+  };
+  const a = scene(), b = scene();
+  return (a.length === b.length && a.every((v, i) => Object.is(v, b[i]))) || 'scenes diverged';
+});
+
+check('the existing hero API is unchanged', () => {
+  const s = new M.ManifoldSim(10, 4);
+  const g = s.addStaticBox(0, 1, 2, 0.1, 0);
+  const b = s.addBox(0, 0, 0.15, 0.15, 0);
+  s.stepTraced(1 / 60);
+  const t = s.trace().slice();
+  const p = s.params().slice();
+  s.delete();
+  return (g === 0 && b === 1 && t[0] === 22 && p.length === 9) || fail('hero api', { g, b, snaps: t[0], params: p.length });
+});
+
+window.__results = results;
+document.getElementById('out').textContent = results.map((r) => `${r.ok ? 'PASS' : 'FAIL'}  ${r.name}${r.detail ? '\n      ' + r.detail : ''}`).join('\n');
+</script>

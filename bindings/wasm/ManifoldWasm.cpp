@@ -11,11 +11,22 @@
 // StepTraced capture. Views, not embind value objects, so a whole 22-stop trace
 // crosses the boundary in a single copy on the JS side.
 //
+// Two surfaces share the class. The HERO surface (addStaticBox / addBox /
+// addCircle / addPolygon / the tumbler hexagon) is what the step-dissection hero
+// was built on and is unchanged. The SCENE surface (setMaterial .. jointCount)
+// is general: any body type and shape, compound fixtures, removal, teleport,
+// impulses, kinematic motion, and all seven joint kinds -- enough to stage a
+// living scene whose denizens arrive, interact and leave. Everything is
+// addressed by body SLOT (the handle index) and joint ID (an index into this
+// binding's own table); a bad slot or id is refused (-1 / false / no-op),
+// never an abort, because the wasm build has no exception catching.
+//
 // MEMORY GROWTH detaches views: JS must copy (slice()) what bodies()/trace()
 // return before the next call into the module.
 //
 // Units are MKS, +Y is DOWN (the engine's default gravity is (0, 10)).
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -31,6 +42,8 @@
 #include <Manifold2D/Physics/Fixture.hpp>
 #include <Manifold2D/Physics/PhysicsWorld.hpp>
 #include <Manifold2D/Physics/StepTrace.hpp>
+#include <Manifold2D/Physics/Joints/Joint.hpp>
+#include <Manifold2D/Physics/Joints/Joints.hpp>     // MouseJoint::SetTarget
 #include <Manifold2D/Physics/Solver/SolverStages.hpp>   // StageType enumerators
 
 #ifndef MANIFOLD_WASM_REV
@@ -57,6 +70,16 @@ namespace
     // around the ring instead of sticking to it.
     constexpr Real kWallFriction    = Real(0.2);
     constexpr Real kWallRestitution = Real(0);
+
+    // Scene-surface shape kinds (addBody / addFixture).
+    constexpr int kShapeCircle  = 0;   // p0 = radius
+    constexpr int kShapeBox     = 1;   // p0, p1 = half-extents
+    constexpr int kShapeCapsule = 2;   // p0 = segment half-length (local x), p1 = radius
+    constexpr int kShapeNgon    = 3;   // p0 = circumradius, p1 = sides (3..12)
+    constexpr int kMaxNgonSides = 12;
+    constexpr std::size_t kMaxSceneVerts = 16;
+    // removeBody wakes bodies within this distance of the removed body's AABB.
+    constexpr Real kWakeMargin = Real(0.05);
 
     // 0xFFFFFFFF ids go over the wire as -1 (contract section 4).
     float Id(std::uint32_t v)
@@ -264,10 +287,242 @@ public:
         return bh.index;
     }
 
+    // ---- the scene surface ------------------------------------------------
+
+    // Material and flags for every body and fixture added AFTER the call
+    // (the scene surface only; the hero surface keeps its fixed materials).
+    void setMaterial(float density, float friction, float restitution, float linearDamping)
+    {
+        m_next.density       = density > 0.0f ? static_cast<Real>(density) : Real(1);
+        m_next.friction      = static_cast<Real>(std::max(0.0f, friction));
+        m_next.restitution   = static_cast<Real>(std::max(0.0f, restitution));
+        m_next.linearDamping = static_cast<Real>(std::max(0.0f, linearDamping));
+    }
+    // A contact needs (A.category & B.mask) and (B.category & A.mask) non-zero.
+    void setFilter(std::uint32_t category, std::uint32_t mask)
+    {
+        m_next.category = category;
+        m_next.mask     = mask;
+    }
+    void setFixedRotation(bool on) { m_next.fixedRotation = on; }
+
+    // type: 0 static, 1 kinematic, 2 dynamic. kind: see kShape*. Returns the
+    // slot, or -1 for a bad type, kind or size.
+    int addBody(int type, int kind, float x, float y, float angle, float p0, float p1)
+    {
+        if (type < 0 || type > 2) { return -1; }
+        Shape shape;
+        if (!makeShape(kind, p0, p1, shape)) { return -1; }
+        return addBodyWithShape(type, x, y, angle, shape);
+    }
+
+    // A convex polygon from a flat [x0, y0, x1, y1, ...] list (3..16 vertices,
+    // either winding). Too few, collinear or concave -> -1.
+    int addBodyPoly(int type, float x, float y, float angle, emscripten::val verts)
+    {
+        if (type < 0 || type > 2) { return -1; }
+        Shape shape;
+        if (!makeConvex(verts, shape)) { return -1; }
+        return addBodyWithShape(type, x, y, angle, shape);
+    }
+
+    // An extra fixture on a live body, in the body's frame (compound bodies:
+    // a truck's cab on its bed). Returns the fixture index or -1.
+    int addFixture(int slot, int kind, float lx, float ly, float langle, float p0, float p1)
+    {
+        BodyHandle h;
+        Shape shape;
+        if (!handle(slot, h) || !makeShape(kind, p0, p1, shape)) { return -1; }
+        return addFixtureWithShape(h, lx, ly, langle, shape);
+    }
+    int addFixturePoly(int slot, float lx, float ly, float langle, emscripten::val verts)
+    {
+        BodyHandle h;
+        Shape shape;
+        if (!handle(slot, h) || !makeConvex(verts, shape)) { return -1; }
+        return addFixtureWithShape(h, lx, ly, langle, shape);
+    }
+
+    // Destroy a body: its contacts, its joints (their ids then refuse every
+    // call) and its kinematic motion go with it; the slot may be reused.
+    // Everything near it or jointed to it is woken afterwards: the engine's
+    // RemoveBody does not wake neighbours, so a sleeping crate would otherwise
+    // hang in the air when the floor under it is removed. "Near" is the body's
+    // AABB grown by kWakeMargin -- a geometric test, because the contact-event
+    // table does not reliably hold a sleeping body's pair with a static one.
+    bool removeBody(int slot)
+    {
+        BodyHandle h;
+        if (!handle(slot, h)) { return false; }
+        std::vector<BodyHandle> partners;
+        Aabb box = m_world->SlotAabb(h.index);
+        box.min = Vec2(box.min.x - kWakeMargin, box.min.y - kWakeMargin);
+        box.max = Vec2(box.max.x + kWakeMargin, box.max.y + kWakeMargin);
+        m_world->QueryAABB(box, partners);
+        for (Joint*& j : m_joints)
+        {
+            // RemoveBody frees these joints itself; forget them first.
+            if (j != nullptr && (j->HandleA() == h || j->HandleB() == h))
+            {
+                partners.push_back(j->HandleA() == h ? j->HandleB() : j->HandleA());
+                j = nullptr;
+            }
+        }
+        m_kin.erase(std::remove_if(m_kin.begin(), m_kin.end(),
+                                   [&](const Kin& k) { return k.h == h; }),
+                    m_kin.end());
+        m_world->RemoveBody(h);
+        wakeAll(partners);
+        return true;
+    }
+    bool isAlive(int slot) const
+    {
+        BodyHandle h;
+        return handle(slot, h);
+    }
+
+    // Teleport (no swept motion between the old and new pose).
+    void setTransform(int slot, float x, float y, float angle)
+    {
+        BodyHandle h;
+        if (!handle(slot, h)) { return; }
+        m_world->SetPosition(h, Vec2(static_cast<Real>(x), static_cast<Real>(y)));
+        m_world->SetAngle(h, static_cast<Real>(angle));
+        for (Kin& k : m_kin) { if (k.h == h) { k.angle = static_cast<Real>(angle); } }
+    }
+    void setVelocity(int slot, float vx, float vy, float w)
+    {
+        BodyHandle h;
+        if (!handle(slot, h)) { return; }
+        m_world->SetVelocity(h, Vec2(static_cast<Real>(vx), static_cast<Real>(vy)));
+        m_world->SetAngularVelocity(h, static_cast<Real>(w));
+    }
+    // A linear impulse at world point (px, py). Dynamic bodies only.
+    void applyImpulse(int slot, float ix, float iy, float px, float py)
+    {
+        BodyHandle h;
+        if (!handle(slot, h)) { return; }
+        m_world->ApplyImpulse(h, Vec2(static_cast<Real>(ix), static_cast<Real>(iy)),
+                              Vec2(static_cast<Real>(px), static_cast<Real>(py)));
+    }
+    // Drive a kinematic body. The engine integrates a kinematic body's
+    // position but not its angle (see setHexagonSpin), so the binding advances
+    // the angle before every step, the same way it does for the hexagon.
+    void setKinematic(int slot, float vx, float vy, float w)
+    {
+        BodyHandle h;
+        if (!handle(slot, h) || m_world->GetType(h) != BodyType::Kinematic) { return; }
+        m_world->SetVelocity(h, Vec2(static_cast<Real>(vx), static_cast<Real>(vy)));
+        m_world->SetAngularVelocity(h, static_cast<Real>(w));
+        for (Kin& k : m_kin)
+        {
+            if (k.h == h) { k.omega = static_cast<Real>(w); return; }
+        }
+        m_kin.push_back(Kin{ h, static_cast<Real>(w), m_world->GetAngle(h) });
+    }
+
+    // ---- joints. Each returns a joint id, or -1 for a bad slot. ----------
+    // Distance: hold the CENTRES at `length` (<= 0: their current distance).
+    int addDistanceJoint(int a, int b, float length)
+    {
+        JointDef d;
+        d.kind   = JointKind::Distance;
+        d.length = static_cast<Real>(length);
+        return addJoint(a, b, d);
+    }
+    // Revolute: pin A and B at world point (ax, ay).
+    int addRevoluteJoint(int a, int b, float ax, float ay)
+    {
+        JointDef d;
+        d.kind   = JointKind::Revolute;
+        d.anchor = Vec2(static_cast<Real>(ax), static_cast<Real>(ay));
+        return addJoint(a, b, d);
+    }
+    // Weld: revolute at (ax, ay) plus the relative angle locked as it is now.
+    int addWeldJoint(int a, int b, float ax, float ay)
+    {
+        JointDef d;
+        d.kind   = JointKind::Weld;
+        d.anchor = Vec2(static_cast<Real>(ax), static_cast<Real>(ay));
+        return addJoint(a, b, d);
+    }
+    // Prismatic: B slides along the world axis only, no relative rotation.
+    int addPrismaticJoint(int a, int b, float axisX, float axisY)
+    {
+        JointDef d;
+        d.kind = JointKind::Prismatic;
+        d.axis = Vec2(static_cast<Real>(axisX), static_cast<Real>(axisY));
+        return addJoint(a, b, d);
+    }
+    // Wheel: B rides A's axis (A's frame, now) on a spring of hz / zeta at world
+    // anchor (ax, ay); maxTorque > 0 drives B's spin toward motorSpeed (rad/s,
+    // positive = clockwise on screen with +y down, so a car rolls to +x).
+    int addWheelJoint(int a, int b, float ax, float ay, float axisX, float axisY,
+                      float hz, float zeta, float motorSpeed, float maxTorque)
+    {
+        JointDef d;
+        d.kind           = JointKind::Wheel;
+        d.anchor         = Vec2(static_cast<Real>(ax), static_cast<Real>(ay));
+        d.axis           = Vec2(static_cast<Real>(axisX), static_cast<Real>(axisY));
+        d.frequencyHz    = static_cast<Real>(hz);
+        d.dampingRatio   = static_cast<Real>(zeta);
+        d.enableMotor    = maxTorque > 0.0f;
+        d.motorSpeed     = static_cast<Real>(motorSpeed);
+        d.maxMotorTorque = static_cast<Real>(std::max(0.0f, maxTorque));
+        return addJoint(a, b, d);
+    }
+    // Motor: drive B's angular velocity relative to A toward `speed`.
+    int addMotorJoint(int a, int b, float speed, float maxTorque)
+    {
+        JointDef d;
+        d.kind           = JointKind::Motor;
+        d.motorSpeed     = static_cast<Real>(speed);
+        d.maxMotorTorque = static_cast<Real>(std::max(0.0f, maxTorque));
+        return addJoint(a, b, d);
+    }
+    // Mouse: a soft spring dragging body B toward (tx, ty); move it with
+    // setMouseTarget. Body A is none.
+    int addMouseJoint(int b, float tx, float ty, float maxForce)
+    {
+        BodyHandle hb;
+        if (!handle(b, hb)) { return -1; }
+        JointDef d;
+        d.kind     = JointKind::Mouse;
+        d.a        = BodyHandle{ kInvalidSlot, 0u };
+        d.b        = hb;
+        d.target   = Vec2(static_cast<Real>(tx), static_cast<Real>(ty));
+        d.maxForce = static_cast<Real>(std::max(0.0f, maxForce));
+        return storeJoint(m_world->AddJoint(d));
+    }
+    bool setMouseTarget(int id, float tx, float ty)
+    {
+        Joint* j = joint(id);
+        auto* mj = j != nullptr ? dynamic_cast<MouseJoint*>(j) : nullptr;
+        if (mj == nullptr) { return false; }
+        mj->SetTarget(Vec2(static_cast<Real>(tx), static_cast<Real>(ty)));
+        return true;
+    }
+    // Removing a joint wakes both its bodies (a released load must fall).
+    bool removeJoint(int id)
+    {
+        Joint* j = joint(id);
+        if (j == nullptr) { return false; }
+        const std::vector<BodyHandle> ends{ j->HandleA(), j->HandleB() };
+        m_world->RemoveJoint(j);
+        wakeAll(ends);
+        m_joints[static_cast<std::size_t>(id)] = nullptr;
+        return true;
+    }
+    std::uint32_t jointCount() const
+    {
+        return static_cast<std::uint32_t>(m_world->JointCount());
+    }
+
     void step(float dt)
     {
         const Real h = static_cast<Real>(dt);
         advanceHexagon(h);
+        advanceKinematics(h);
         m_world->Step(h);
     }
 
@@ -277,6 +532,7 @@ public:
     {
         const Real h = static_cast<Real>(dt);
         advanceHexagon(h);
+        advanceKinematics(h);
         m_trace.snapshots.clear();
         m_world->StepTraced(h, m_trace);
         packTrace();
@@ -318,6 +574,173 @@ public:
     }
 
 private:
+    // What setMaterial / setFilter / setFixedRotation leave for the next add.
+    struct NextBody
+    {
+        Real          density       = kDynDensity;
+        Real          friction      = kDynFriction;
+        Real          restitution   = kDynRestitution;
+        Real          linearDamping = Real(0);
+        std::uint32_t category      = 1u;
+        std::uint32_t mask          = 0xFFFFFFFFu;
+        bool          fixedRotation = false;
+    };
+    // A kinematic body whose angle the binding advances (setKinematic).
+    struct Kin
+    {
+        BodyHandle h;
+        Real       omega = Real(0);
+        Real       angle = Real(0);
+    };
+
+    // slot -> live handle; false for a negative, out-of-range or dead slot.
+    bool handle(int slot, BodyHandle& out) const
+    {
+        if (slot < 0 || static_cast<std::uint32_t>(slot) >= m_world->Count()) { return false; }
+        const std::uint32_t i = static_cast<std::uint32_t>(slot);
+        if (!m_world->Alive(i)) { return false; }
+        out = m_world->HandleOf(i);
+        return true;
+    }
+
+    // Validated shapes: a bad kind, a non-positive size or an out-of-range
+    // side count is refused here, before the engine (which would throw).
+    static bool makeShape(int kind, float p0, float p1, Shape& out)
+    {
+        const Real a = static_cast<Real>(p0);
+        const Real b = static_cast<Real>(p1);
+        switch (kind)
+        {
+        case kShapeCircle:
+            if (!(p0 > 0.0f)) { return false; }
+            out = MakeCircle(a);
+            return true;
+        case kShapeBox:
+            if (!(p0 > 0.0f) || !(p1 > 0.0f)) { return false; }
+            out = MakeAabb(a, b);
+            return true;
+        case kShapeCapsule:
+            if (!(p0 > 0.0f) || !(p1 > 0.0f)) { return false; }
+            out = MakeCapsule(a, b);
+            return true;
+        case kShapeNgon:
+        {
+            const int sides = static_cast<int>(p1);
+            if (!(p0 > 0.0f) || sides < 3 || sides > kMaxNgonSides) { return false; }
+            std::vector<Vec2> verts;
+            verts.reserve(static_cast<std::size_t>(sides));
+            for (int k = 0; k < sides; ++k)
+            {
+                const Real t = Real(2) * kPi * static_cast<Real>(k) / static_cast<Real>(sides);
+                verts.push_back(Vec2(a * std::cos(t), a * std::sin(t)));
+            }
+            out = MakePolygon(verts);
+            return true;
+        }
+        default:
+            return false;
+        }
+    }
+
+    // A flat JS number array -> a convex polygon. Every turn must have the same
+    // sign and a non-trivial magnitude: that refuses collinear, concave and
+    // self-intersecting lists along with the too-short ones.
+    static bool makeConvex(const emscripten::val& flat, Shape& out)
+    {
+        const std::vector<float> f = emscripten::vecFromJSArray<float>(flat);
+        if (f.size() % 2u != 0u) { return false; }
+        const std::size_t n = f.size() / 2u;
+        if (n < 3u || n > kMaxSceneVerts) { return false; }
+        std::vector<Vec2> verts;
+        verts.reserve(n);
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            verts.push_back(Vec2(static_cast<Real>(f[2u * i]), static_cast<Real>(f[2u * i + 1u])));
+        }
+        int sign = 0;
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            const Vec2& p0 = verts[i];
+            const Vec2& p1 = verts[(i + 1u) % n];
+            const Vec2& p2 = verts[(i + 2u) % n];
+            const Real cross = (p1.x - p0.x) * (p2.y - p1.y) - (p1.y - p0.y) * (p2.x - p1.x);
+            if (std::abs(cross) < Real(1e-9)) { return false; }
+            const int s = cross > Real(0) ? 1 : -1;
+            if (sign == 0) { sign = s; }
+            else if (s != sign) { return false; }
+        }
+        out = MakePolygon(verts);
+        return true;
+    }
+
+    int addBodyWithShape(int type, float x, float y, float angle, const Shape& shape)
+    {
+        BodyDef bd;
+        bd.type           = static_cast<BodyType>(type);
+        bd.position       = Vec2(static_cast<Real>(x), static_cast<Real>(y));
+        bd.shape          = shape;
+        bd.density        = m_next.density;
+        bd.friction       = m_next.friction;
+        bd.restitution    = m_next.restitution;
+        bd.linearDamping  = m_next.linearDamping;
+        bd.fixedRotation  = m_next.fixedRotation;
+        bd.categoryBits   = m_next.category;
+        bd.maskBits       = m_next.mask;
+        const BodyHandle h = m_world->AddBody(bd);
+        if (angle != 0.0f) { m_world->SetAngle(h, static_cast<Real>(angle)); }
+        return static_cast<int>(h.index);
+    }
+
+    int addFixtureWithShape(BodyHandle h, float lx, float ly, float langle, const Shape& shape)
+    {
+        FixtureDef fd;
+        fd.shape        = shape;
+        fd.localPos     = Vec2(static_cast<Real>(lx), static_cast<Real>(ly));
+        fd.localAngle   = static_cast<Real>(langle);
+        fd.density      = m_next.density;
+        fd.friction     = m_next.friction;
+        fd.restitution  = m_next.restitution;
+        fd.categoryBits = m_next.category;
+        fd.maskBits     = m_next.mask;
+        return static_cast<int>(m_world->AddFixture(h, fd).index);
+    }
+
+    int addJoint(int a, int b, JointDef d)
+    {
+        if (!handle(a, d.a) || !handle(b, d.b) || a == b) { return -1; }
+        return storeJoint(m_world->AddJoint(d));
+    }
+    int storeJoint(Joint* j)
+    {
+        if (j == nullptr) { return -1; }
+        // Ids are never reused: a stale id held by JS can never reach a newer joint.
+        m_joints.push_back(j);
+        return static_cast<int>(m_joints.size() - 1u);
+    }
+    Joint* joint(int id) const
+    {
+        if (id < 0 || static_cast<std::size_t>(id) >= m_joints.size()) { return nullptr; }
+        return m_joints[static_cast<std::size_t>(id)];
+    }
+
+    void wakeAll(const std::vector<BodyHandle>& hs)
+    {
+        for (const BodyHandle& p : hs)
+        {
+            if (m_world->IsValid(p) && m_world->GetType(p) == BodyType::Dynamic) { m_world->Wake(p); }
+        }
+    }
+
+    void advanceKinematics(Real dt)
+    {
+        for (Kin& k : m_kin)
+        {
+            if (k.omega == Real(0)) { continue; }
+            k.angle = std::fmod(k.angle + k.omega * dt, Real(2) * kPi);
+            m_world->SetAngle(k.h, k.angle);
+        }
+    }
+
     void advanceHexagon(Real dt)
     {
         if (m_hex.generation == 0u) { return; }   // no hexagon was added
@@ -387,6 +810,9 @@ private:
     std::vector<float>            m_traceBuf;
     WorldDef                      m_def;      // what the world was built from (params())
     std::array<float, 9>          m_params{}; // params()'s backing store
+    NextBody                      m_next;     // the scene surface's pending material
+    std::vector<Joint*>           m_joints;   // joint id -> borrowed Joint* (nullptr once gone)
+    std::vector<Kin>              m_kin;      // kinematic bodies with a binding-advanced angle
 };
 
 EMSCRIPTEN_BINDINGS(manifold)
@@ -409,7 +835,31 @@ EMSCRIPTEN_BINDINGS(manifold)
         .function("bodyCount",           &ManifoldSim::bodyCount)
         .function("bodies",              &ManifoldSim::bodies)
         .function("trace",               &ManifoldSim::trace)
-        .function("params",              &ManifoldSim::params);
+        .function("params",              &ManifoldSim::params)
+        // the scene surface
+        .function("setMaterial",         &ManifoldSim::setMaterial)
+        .function("setFilter",           &ManifoldSim::setFilter)
+        .function("setFixedRotation",    &ManifoldSim::setFixedRotation)
+        .function("addBody",             &ManifoldSim::addBody)
+        .function("addBodyPoly",         &ManifoldSim::addBodyPoly)
+        .function("addFixture",          &ManifoldSim::addFixture)
+        .function("addFixturePoly",      &ManifoldSim::addFixturePoly)
+        .function("removeBody",          &ManifoldSim::removeBody)
+        .function("isAlive",             &ManifoldSim::isAlive)
+        .function("setTransform",        &ManifoldSim::setTransform)
+        .function("setVelocity",         &ManifoldSim::setVelocity)
+        .function("applyImpulse",        &ManifoldSim::applyImpulse)
+        .function("setKinematic",        &ManifoldSim::setKinematic)
+        .function("addDistanceJoint",    &ManifoldSim::addDistanceJoint)
+        .function("addRevoluteJoint",    &ManifoldSim::addRevoluteJoint)
+        .function("addWeldJoint",        &ManifoldSim::addWeldJoint)
+        .function("addPrismaticJoint",   &ManifoldSim::addPrismaticJoint)
+        .function("addWheelJoint",       &ManifoldSim::addWheelJoint)
+        .function("addMotorJoint",       &ManifoldSim::addMotorJoint)
+        .function("addMouseJoint",       &ManifoldSim::addMouseJoint)
+        .function("setMouseTarget",      &ManifoldSim::setMouseTarget)
+        .function("removeJoint",         &ManifoldSim::removeJoint)
+        .function("jointCount",          &ManifoldSim::jointCount);
     // embind gives every class_ a .delete() automatically -- contract section 3's
     // sim.delete() needs no registration.
 }
