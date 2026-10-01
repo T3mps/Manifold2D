@@ -213,14 +213,25 @@ namespace Manifold2D
             const Real maxHertz = (h > Real(0)) ? (Real(0.125) / h) : w.ContactHertz();
             const Real contactHertz = std::min(w.ContactHertz(), maxHertz);
             const SoftCoeffs contactSoft = MakeSoft(contactHertz, w.ContactDampingRatio(), h);
+            // Stiffer for static contacts to avoid bodies getting pushed through the
+            // ground (Box2D v3 solver.c: staticSoftness = b2MakeSoft(2 * contactHertz,
+            // ...)). Box2D picks it when a side has no solver body -- a static body;
+            // here that is a static body or a tile span. Kinematic bodies have solver
+            // bodies in Box2D (coloured like dynamic ones), so their contacts keep the
+            // regular softness.
+            const SoftCoeffs staticSoft = MakeSoft(Real(2) * contactHertz, w.ContactDampingRatio(), h);
 
             for (std::uint32_t c = 0; c < ctx.contactCount; ++c)
             {
                 ContactConstraint& cc = ctx.contacts[c];
 
-                cc.biasRate     = contactSoft.biasRate;
-                cc.massScale    = contactSoft.massScale;
-                cc.impulseScale = contactSoft.impulseScale;
+                const bool staticSide =
+                    !cc.bodyBIsBody || w.TypeSlot(cc.bodyB) == BodyType::Static ||
+                    w.TypeSlot(cc.bodyA) == BodyType::Static;
+                const SoftCoeffs& soft = staticSide ? staticSoft : contactSoft;
+                cc.biasRate     = soft.biasRate;
+                cc.massScale    = soft.massScale;
+                cc.impulseScale = soft.impulseScale;
 
                 const Vec2 n = cc.normal;
                 const Vec2 tangent(-n.y, n.x);
