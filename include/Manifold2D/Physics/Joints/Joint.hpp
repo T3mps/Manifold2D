@@ -138,6 +138,14 @@ namespace Manifold2D
             // Apply one velocity-constraint solve pass. Ports the Lua :solve(w).
             virtual void SolveVelocity(PhysicsWorld& w) = 0;
 
+            // Called by the solver at the start of every sub-step, before that
+            // sub-step's first SolveVelocity. Impulse-clamped drives (the Motor
+            // and Wheel motors) reset their accumulated impulse here so the
+            // clamp maxMotorTorque * subDt is a per-SUB-STEP budget: the motor
+            // then delivers maxMotorTorque over the whole step, as Box2D's
+            // per-sub-step motor does. Default: nothing to reset.
+            virtual void BeginSubstep() noexcept {}
+
             // The two body slots (kInvalidSlot for a static-anchor / missing
             // body). The ISLAND pass reads these to keep jointed dynamic bodies
             // awake. Resolved at Prepare; kInvalidSlot before the first Prepare.

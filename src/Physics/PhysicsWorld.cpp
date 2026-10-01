@@ -198,6 +198,7 @@ namespace Manifold2D
             m_rest.resize(next, Real(0));
             m_fric.resize(next, Real(0));
             m_linDamp.resize(next, Real(0));
+            m_gravityScale.resize(next, Real(1));
             m_sleepTimer.resize(next, Real(0));
             m_maxExtent.resize(next, Real(0));
             m_sleepThreshold.resize(next, m_sleepThresholdDefault);
@@ -984,6 +985,7 @@ namespace Manifold2D
             m_rest[idx]       = def.restitution;
             m_fric[idx]       = def.friction;
             m_linDamp[idx]    = def.linearDamping;
+            m_gravityScale[idx] = std::isfinite(def.gravityScale) ? def.gravityScale : Real(1);
             m_sleepTimer[idx] = Real(0);
             // Per-body sleep gate: explicit BodyDef override (>= 0) or inherit world.
             m_sleepThreshold[idx] = (def.sleepThreshold >= Real(0))
@@ -1604,6 +1606,95 @@ namespace Manifold2D
                 return Real(0);
             }
             return m_angle[h.index];
+        }
+
+        // ---- gravity well + per-body gravity scale ---------------------------
+
+        void PhysicsWorld::SetGravityWell(const GravityWell& well)
+        {
+            if (!well.enabled)
+            {
+                m_gravityWell.enabled = false;
+                return;
+            }
+            const bool finite = std::isfinite(well.center.x) && std::isfinite(well.center.y)
+                             && std::isfinite(well.surfaceRadius) && std::isfinite(well.surfaceGravity)
+                             && std::isfinite(well.fadeStart) && std::isfinite(well.fadeEnd);
+            const bool fadeOk = well.falloff != GravityFalloff::Fade
+                             || (well.fadeStart >= Real(0) && well.fadeEnd > well.fadeStart);
+            if (!finite || !(well.surfaceRadius > Real(0)) || !fadeOk)
+            {
+                MOSAIC_LOG_WARN("SetGravityWell: invalid well ignored (non-finite field, surfaceRadius <= 0, or fadeEnd <= fadeStart)");
+                return;
+            }
+            m_gravityWell = well;
+        }
+
+        Vec2 PhysicsWorld::GravityWellAccel(Vec2 p) const noexcept
+        {
+            const GravityWell& gw = m_gravityWell;
+            if (!gw.enabled)
+            {
+                return Vec2(Real(0), Real(0));
+            }
+            const Real dx = gw.center.x - p.x;
+            const Real dy = gw.center.y - p.y;
+            const Real r2 = dx * dx + dy * dy;
+            if (!(r2 > Real(0)))
+            {
+                return Vec2(Real(0), Real(0)); // at the centre: no direction, no pull
+            }
+            const Real r = std::sqrt(r2);
+            const Real R = gw.surfaceRadius;
+            Real g;
+            if (r < R)
+            {
+                g = gw.surfaceGravity * r / R;
+            }
+            else if (gw.falloff == GravityFalloff::InverseSquare)
+            {
+                g = gw.surfaceGravity * (R * R) / r2;
+            }
+            else if (r <= gw.fadeStart)
+            {
+                g = gw.surfaceGravity;
+            }
+            else if (r >= gw.fadeEnd)
+            {
+                g = Real(0);
+            }
+            else
+            {
+                const Real t = (r - gw.fadeStart) / (gw.fadeEnd - gw.fadeStart);
+                g = gw.surfaceGravity * (Real(1) - t * t * (Real(3) - Real(2) * t));
+            }
+            const Real k = g / r; // unit direction (dx, dy) / r, times g
+            return Vec2(dx * k, dy * k);
+        }
+
+        void PhysicsWorld::SetGravityScale(BodyHandle h, Real scale)
+        {
+            if (!IsValid(h))
+            {
+                MOSAIC_LOG_WARN("operation on a stale/invalid BodyHandle ignored");
+                return;
+            }
+            if (!std::isfinite(scale))
+            {
+                MOSAIC_LOG_WARN("SetGravityScale: non-finite scale ignored");
+                return;
+            }
+            const std::uint32_t i = h.index;
+            m_gravityScale[i] = scale;
+            if (static_cast<BodyType>(m_btype[i]) == BodyType::Dynamic)
+            {
+                Wake(h); // a sleeping body would otherwise never feel the change
+            }
+        }
+
+        Real PhysicsWorld::GravityScale(BodyHandle h) const noexcept
+        {
+            return IsValid(h) ? m_gravityScale[h.index] : Real(1);
         }
 
         void PhysicsWorld::SetAngle(BodyHandle h, Real angle)

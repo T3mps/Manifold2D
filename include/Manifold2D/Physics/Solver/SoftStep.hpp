@@ -143,6 +143,7 @@ namespace Manifold2D
             void PrepareContacts(SolverContext& ctx);
             void PrepareJoints(SolverContext& ctx);            // joint Prepare (subDt bias)
             void SolveJoints(SolverContext& ctx);              // one joint velocity pass (per sub-step)
+            void BeginJointSubstep(SolverContext& ctx);        // open each joint's per-sub-step budget (motors)
 
             // ---- SIMD lane-wide contact-solve helpers (Part 1) -------------
             //

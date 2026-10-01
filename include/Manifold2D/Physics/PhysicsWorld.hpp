@@ -159,6 +159,49 @@ namespace Manifold2D
             std::uint32_t maskBits     = 0xFFFFFFFFu;  // collision mask
             Vec2          localPos     { Real(0), Real(0) }; // body-frame offset
             Real          localAngle   = Real(0);            // body-frame rotation
+
+            // Per-body multiplier on BOTH the world gravity and the gravity well
+            // (see GravityWell). 1 = full gravity, 0 = none (a drone, a floating
+            // marker), negative = pulled the other way. Dynamic bodies only.
+            Real          gravityScale = Real(1);
+        };
+
+        // ----------------------------------------------------------------
+        // GravityWell: an optional radial gravity field (a planet), added to
+        // the world gravity for every awake Dynamic body.
+        // ----------------------------------------------------------------
+        //
+        // Evaluated per body INSIDE the per-sub-step velocity integration, at
+        // the body's current in-step position (start-of-step position + the TGS
+        // position delta), the same place and the same way world gravity is
+        // applied. That is semi-implicit Euler at the sub-step, which keeps
+        // orbits bounded. (Pushing bodies once per Step from outside -- an
+        // impulse or a held force -- integrates the field at the start-of-step
+        // position for every sub-step, which pumps energy into orbits and wakes
+        // every body it touches; this is the engine-side alternative.)
+        //
+        // Field magnitude at distance r from `center` (R = surfaceRadius,
+        // g0 = surfaceGravity), always pointing at `center`:
+        //   r <  R                         : g0 * r / R            (interior, uniform-density planet)
+        //   InverseSquare, r >= R          : g0 * (R / r)^2        (real orbits)
+        //   Fade, R <= r <= fadeStart      : g0                    (a flat-feeling surface band)
+        //   Fade, fadeStart < r < fadeEnd  : g0 * (1 - smoothstep) (thins out with altitude)
+        //   Fade, r >= fadeEnd             : 0                     (deep space floats)
+        enum class GravityFalloff : std::uint8_t
+        {
+            InverseSquare = 0,
+            Fade          = 1,
+        };
+
+        struct GravityWell
+        {
+            bool           enabled        = false;
+            Vec2           center         { Real(0), Real(0) };
+            Real           surfaceRadius  = Real(1);  // > 0
+            Real           surfaceGravity = Real(0);  // m/s^2 at the surface (pulls toward center)
+            GravityFalloff falloff        = GravityFalloff::InverseSquare;
+            Real           fadeStart      = Real(0);  // Fade only: fadeStart < fadeEnd
+            Real           fadeEnd        = Real(0);
         };
 
         // ----------------------------------------------------------------
@@ -491,6 +534,28 @@ namespace Manifold2D
             // (lines 121-122).
             [[nodiscard]] Real GetAngle(BodyHandle h) const noexcept;
             void SetAngle(BodyHandle h, Real angle);
+
+            // ---- gravity well + per-body gravity scale ----------------------
+
+            // Install (or, with enabled = false, remove) the world's radial
+            // gravity field. An invalid well (non-finite fields, surfaceRadius
+            // <= 0, or a Fade with fadeEnd <= fadeStart or fadeStart < 0) is
+            // refused with a warning and the previous well is kept. Takes effect
+            // on the next Step for every AWAKE dynamic body; sleeping bodies keep
+            // sleeping until something wakes them (as with world gravity).
+            void SetGravityWell(const GravityWell& well);
+            [[nodiscard]] const GravityWell& GetGravityWell() const noexcept { return m_gravityWell; }
+
+            // The well's acceleration at world point p ((0,0) when disabled).
+            // The solver calls this per body per sub-step; exposed for queries
+            // (e.g. a renderer drawing the field, a controller cancelling it).
+            [[nodiscard]] Vec2 GravityWellAccel(Vec2 p) const noexcept;
+
+            // Per-body gravity multiplier (see BodyDef::gravityScale). Setting it
+            // on a Dynamic body wakes it so the change takes effect; a
+            // non-finite scale is refused.
+            void SetGravityScale(BodyHandle h, Real scale);
+            [[nodiscard]] Real GravityScale(BodyHandle h) const noexcept;
 
             // Render-boundary lerp between prev and current step positions
             // (ports Body:drawPosition).
@@ -896,6 +961,7 @@ namespace Manifold2D
             [[nodiscard]] Real RestSlot(std::uint32_t i) const noexcept { return m_rest[i]; }
             [[nodiscard]] Real FricSlot(std::uint32_t i) const noexcept { return m_fric[i]; }
             [[nodiscard]] Real LinDampSlot(std::uint32_t i) const noexcept { return m_linDamp[i]; }
+            [[nodiscard]] Real GravityScaleSlot(std::uint32_t i) const noexcept { return m_gravityScale[i]; }
             [[nodiscard]] Vec2 VelSlot(std::uint32_t i) const noexcept
             {
                 return Vec2(m_velX[i], m_velY[i]);
@@ -1307,6 +1373,7 @@ namespace Manifold2D
             std::vector<Real>          m_invMass, m_invInertia;
             std::vector<Real>          m_rest, m_fric;        // solver params (P2.2)
             std::vector<Real>          m_linDamp;             // velocity decay
+            std::vector<Real>          m_gravityScale;        // per-body gravity multiplier (world gravity + well)
             std::vector<Real>          m_sleepTimer;          // island sleep (P2.4)
             std::vector<Real>          m_maxExtent;           // body COM->farthest-point dist (+radius); sleep test
             std::vector<Real>          m_sleepThreshold;      // per-body sleep speed gate (m/s); see WorldDef/BodyDef
@@ -1393,6 +1460,7 @@ namespace Manifold2D
             // Global gravity applied to awake Dynamic bodies in Step.
             Real m_gravityX = Real(0);
             Real m_gravityY = Real(10);   // Box2D v3 default (types.c:13, y-down)
+            GravityWell m_gravityWell{};  // optional radial field (SetGravityWell); disabled by default
 
             // Soft Step config (copied from WorldDef; read by the solver).
             std::uint32_t m_substepCount         = 4u;

@@ -191,6 +191,17 @@ namespace Manifold2D
             }
             void Prepare(PhysicsWorld& w, Real dt) override;
             void SolveVelocity(PhysicsWorld& w) override;
+            void BeginSubstep() noexcept override { m_motorImpulse = Real(0); }
+
+            // Live motor control (takes effect from the next Step; the torque
+            // clamp is re-derived in Prepare). A vehicle throttles, brakes or
+            // reverses through these instead of rebuilding its wheel joints.
+            void EnableMotor(bool on) noexcept { m_enableMotor = on; }
+            void SetMotorSpeed(Real speed) noexcept { m_motorSpeed = speed; }
+            void SetMaxMotorTorque(Real torque) noexcept { m_maxMotorTorque = torque > Real(0) ? torque : Real(0); }
+            [[nodiscard]] bool IsMotorEnabled() const noexcept { return m_enableMotor; }
+            [[nodiscard]] Real MotorSpeed() const noexcept { return m_motorSpeed; }
+            [[nodiscard]] Real MaxMotorTorque() const noexcept { return m_maxMotorTorque; }
             [[nodiscard]] std::uint32_t BodyA() const noexcept override { return m_ia; }
             [[nodiscard]] std::uint32_t BodyB() const noexcept override { return m_ib; }
             [[nodiscard]] BodyHandle HandleA() const noexcept override { return m_hA; }
@@ -244,6 +255,13 @@ namespace Manifold2D
             }
             void Prepare(PhysicsWorld& w, Real dt) override;
             void SolveVelocity(PhysicsWorld& w) override;
+            void BeginSubstep() noexcept override { m_impulse = Real(0); }
+
+            // Live motor control (takes effect from the next Step).
+            void SetMotorSpeed(Real speed) noexcept { m_motorSpeed = speed; }
+            void SetMaxMotorTorque(Real torque) noexcept { m_maxMotorTorque = torque > Real(0) ? torque : Real(0); }
+            [[nodiscard]] Real MotorSpeed() const noexcept { return m_motorSpeed; }
+            [[nodiscard]] Real MaxMotorTorque() const noexcept { return m_maxMotorTorque; }
             [[nodiscard]] std::uint32_t BodyA() const noexcept override { return m_ia; }
             [[nodiscard]] std::uint32_t BodyB() const noexcept override { return m_ib; }
             [[nodiscard]] BodyHandle HandleA() const noexcept override { return m_hA; }
