@@ -13,10 +13,12 @@
 //
 // Two surfaces share the class. The HERO surface (addStaticBox / addBox /
 // addCircle / addPolygon / the tumbler hexagon) is what the step-dissection hero
-// was built on and is unchanged. The SCENE surface (setMaterial .. jointCount)
-// is general: any body type and shape, compound fixtures, removal, teleport,
-// impulses, kinematic motion, and all seven joint kinds -- enough to stage a
-// living scene whose denizens arrive, interact and leave. Everything is
+// was built on and is unchanged. The SCENE surface (setMaterial .. jointCount,
+// then wake .. setJointMotor) is general: any body type and shape, compound
+// fixtures, removal, teleport, impulses, kinematic motion, all seven joint
+// kinds, a radial gravity well with per-body gravity scale, a per-step contact
+// export, and live motor control -- enough to stage a living scene whose
+// denizens arrive, interact and leave. Everything is
 // addressed by body SLOT (the handle index) and joint ID (an index into this
 // binding's own table); a bad slot or id is refused (-1 / false / no-op),
 // never an abort, because the wasm build has no exception catching.
@@ -306,6 +308,16 @@ public:
     }
     void setFixedRotation(bool on) { m_next.fixedRotation = on; }
 
+    // More options for the next bodies: sleepThreshold (m/s; < 0 inherits the
+    // world's 0.05, 0 = never sleeps -- drones, anything a controller steers),
+    // bullet (CCD against statics) and gravityScale (world gravity + the well).
+    void setBodyOptions(float sleepThreshold, bool bullet, float gravityScale)
+    {
+        m_next.sleepThreshold = static_cast<Real>(sleepThreshold);
+        m_next.bullet         = bullet;
+        m_next.gravityScale   = std::isfinite(gravityScale) ? static_cast<Real>(gravityScale) : Real(1);
+    }
+
     // type: 0 static, 1 kinematic, 2 dynamic. kind: see kShape*. Returns the
     // slot, or -1 for a bad type, kind or size.
     int addBody(int type, int kind, float x, float y, float angle, float p0, float p1)
@@ -381,7 +393,9 @@ public:
         return handle(slot, h);
     }
 
-    // Teleport (no swept motion between the old and new pose).
+    // Teleport (no swept motion between the old and new pose). A dynamic body
+    // is woken: the engine's SetPosition does not, so a sleeping body would
+    // otherwise hang at its new pose.
     void setTransform(int slot, float x, float y, float angle)
     {
         BodyHandle h;
@@ -389,6 +403,7 @@ public:
         m_world->SetPosition(h, Vec2(static_cast<Real>(x), static_cast<Real>(y)));
         m_world->SetAngle(h, static_cast<Real>(angle));
         for (Kin& k : m_kin) { if (k.h == h) { k.angle = static_cast<Real>(angle); } }
+        if (m_world->GetType(h) == BodyType::Dynamic) { m_world->Wake(h); }
     }
     void setVelocity(int slot, float vx, float vy, float w)
     {
@@ -494,13 +509,135 @@ public:
         d.maxForce = static_cast<Real>(std::max(0.0f, maxForce));
         return storeJoint(m_world->AddJoint(d));
     }
+    // Moving the target wakes the dragged body: the engine skips a joint whose
+    // body sleeps, so a body that dozed at its old target would never follow.
     bool setMouseTarget(int id, float tx, float ty)
     {
         Joint* j = joint(id);
         auto* mj = j != nullptr ? dynamic_cast<MouseJoint*>(j) : nullptr;
         if (mj == nullptr) { return false; }
         mj->SetTarget(Vec2(static_cast<Real>(tx), static_cast<Real>(ty)));
+        if (m_world->IsValid(mj->HandleB())) { m_world->Wake(mj->HandleB()); }
         return true;
+    }
+
+    // Live motor control for a wheel or motor joint: speed in rad/s, maxTorque
+    // > 0 enables the motor at that torque, 0 lets it coast. false for any
+    // other joint kind or a dead id.
+    bool setJointMotor(int id, float speed, float maxTorque)
+    {
+        Joint* j = joint(id);
+        if (j == nullptr) { return false; }
+        const Real sp = static_cast<Real>(speed);
+        const Real tq = static_cast<Real>(std::max(0.0f, maxTorque));
+        if (auto* wj = dynamic_cast<WheelJoint*>(j))
+        {
+            wj->EnableMotor(tq > Real(0));
+            wj->SetMotorSpeed(sp);
+            wj->SetMaxMotorTorque(tq);
+        }
+        else if (auto* mj = dynamic_cast<MotorJoint*>(j))
+        {
+            mj->SetMotorSpeed(sp);
+            mj->SetMaxMotorTorque(tq);
+        }
+        else
+        {
+            return false;
+        }
+        if (m_world->IsValid(j->HandleA())) { m_world->Wake(j->HandleA()); }
+        if (m_world->IsValid(j->HandleB())) { m_world->Wake(j->HandleB()); }
+        return true;
+    }
+
+    // ---- motion helpers ----------------------------------------------------
+    void wake(int slot)
+    {
+        BodyHandle h;
+        if (handle(slot, h)) { m_world->Wake(h); }
+    }
+    bool isAwake(int slot) const
+    {
+        BodyHandle h;
+        return handle(slot, h) && m_world->IsAwake(h);
+    }
+    // kg; 0 for static, kinematic and bad slots.
+    float mass(int slot) const
+    {
+        BodyHandle h;
+        return handle(slot, h) ? static_cast<float>(m_world->GetBodyMass(h)) : 0.0f;
+    }
+    // A linear impulse at the centre of mass (no torque) -- what a thruster or
+    // a controller's capped correction applies.
+    void applyLinearImpulse(int slot, float ix, float iy)
+    {
+        BodyHandle h;
+        if (!handle(slot, h) || !std::isfinite(ix) || !std::isfinite(iy)) { return; }
+        m_world->ApplyImpulse(h, Vec2(static_cast<Real>(ix), static_cast<Real>(iy)));
+    }
+
+    // ---- the gravity well ------------------------------------------------
+    // falloff 0 = inverse-square (real orbits), 1 = fade: surface gravity to
+    // fadeStart, smoothly to zero at fadeEnd, zero beyond. Evaluated by the
+    // engine per body per sub-step (PhysicsWorld::SetGravityWell). An invalid
+    // well is ignored. Use with new ManifoldSim(0, substeps) for a pure well.
+    void setGravityWell(float cx, float cy, float surfaceRadius, float surfaceGravity,
+                        int falloff, float fadeStart, float fadeEnd)
+    {
+        GravityWell gw;
+        gw.enabled        = true;
+        gw.center         = Vec2(static_cast<Real>(cx), static_cast<Real>(cy));
+        gw.surfaceRadius  = static_cast<Real>(surfaceRadius);
+        gw.surfaceGravity = static_cast<Real>(surfaceGravity);
+        gw.falloff        = falloff == 1 ? GravityFalloff::Fade : GravityFalloff::InverseSquare;
+        gw.fadeStart      = static_cast<Real>(fadeStart);
+        gw.fadeEnd        = static_cast<Real>(fadeEnd);
+        m_world->SetGravityWell(gw);
+    }
+    void clearGravityWell()
+    {
+        GravityWell off;
+        off.enabled = false;
+        m_world->SetGravityWell(off);
+    }
+    void setGravityScale(int slot, float scale)
+    {
+        BodyHandle h;
+        if (handle(slot, h) && std::isfinite(scale)) { m_world->SetGravityScale(h, static_cast<Real>(scale)); }
+    }
+
+    // ---- contacts --------------------------------------------------------
+    // The last step's solved contacts, 8 floats each:
+    //   [bodyA, bodyB, nx, ny, px, py, normalImpulse, approachSpeed]
+    // bodyA is always an awake dynamic body; bodyB is -1 for a tile span. The
+    // normal points B -> A. (px, py) is A's origin plus the first point's
+    // anchor (exact for single-fixture bodies, approximate for compound ones).
+    // normalImpulse sums the manifold points; approachSpeed is the fastest
+    // closing speed captured at Prepare (> 0 while approaching) -- a landing or
+    // a hit reads it. A typed_memory_view: copy before the next call.
+    emscripten::val contacts()
+    {
+        m_contactsBuf.clear();
+        m_world->ForEachContactConstraint([&](const ContactConstraint& cc) {
+            if (cc.pointCount <= 0) { return; }
+            Real impulse = Real(0);
+            Real approach = Real(0);
+            for (int k = 0; k < cc.pointCount; ++k)
+            {
+                impulse += cc.points[k].normalImpulse;
+                approach = std::max(approach, -cc.points[k].relativeVelocity);
+            }
+            const Vec2 pa = m_world->PosSlot(cc.bodyA);
+            m_contactsBuf.push_back(static_cast<float>(cc.bodyA));
+            m_contactsBuf.push_back(cc.bodyBIsBody ? static_cast<float>(cc.bodyB) : -1.0f);
+            m_contactsBuf.push_back(static_cast<float>(cc.normal.x));
+            m_contactsBuf.push_back(static_cast<float>(cc.normal.y));
+            m_contactsBuf.push_back(static_cast<float>(pa.x + cc.points[0].anchorA.x));
+            m_contactsBuf.push_back(static_cast<float>(pa.y + cc.points[0].anchorA.y));
+            m_contactsBuf.push_back(static_cast<float>(impulse));
+            m_contactsBuf.push_back(static_cast<float>(approach));
+        });
+        return emscripten::val(emscripten::typed_memory_view(m_contactsBuf.size(), m_contactsBuf.data()));
     }
     // Removing a joint wakes both its bodies (a released load must fall).
     bool removeJoint(int id)
@@ -584,6 +721,9 @@ private:
         std::uint32_t category      = 1u;
         std::uint32_t mask          = 0xFFFFFFFFu;
         bool          fixedRotation = false;
+        Real          sleepThreshold = Real(-1);  // < 0 inherits the world default
+        bool          bullet         = false;
+        Real          gravityScale   = Real(1);
     };
     // A kinematic body whose angle the binding advances (setKinematic).
     struct Kin
@@ -686,6 +826,9 @@ private:
         bd.fixedRotation  = m_next.fixedRotation;
         bd.categoryBits   = m_next.category;
         bd.maskBits       = m_next.mask;
+        bd.sleepThreshold = m_next.sleepThreshold;
+        bd.bullet         = m_next.bullet;
+        bd.gravityScale   = m_next.gravityScale;
         const BodyHandle h = m_world->AddBody(bd);
         if (angle != 0.0f) { m_world->SetAngle(h, static_cast<Real>(angle)); }
         return static_cast<int>(h.index);
@@ -813,6 +956,7 @@ private:
     NextBody                      m_next;     // the scene surface's pending material
     std::vector<Joint*>           m_joints;   // joint id -> borrowed Joint* (nullptr once gone)
     std::vector<Kin>              m_kin;      // kinematic bodies with a binding-advanced angle
+    std::vector<float>            m_contactsBuf; // contacts()'s backing store
 };
 
 EMSCRIPTEN_BINDINGS(manifold)
@@ -859,7 +1003,17 @@ EMSCRIPTEN_BINDINGS(manifold)
         .function("addMouseJoint",       &ManifoldSim::addMouseJoint)
         .function("setMouseTarget",      &ManifoldSim::setMouseTarget)
         .function("removeJoint",         &ManifoldSim::removeJoint)
-        .function("jointCount",          &ManifoldSim::jointCount);
+        .function("jointCount",          &ManifoldSim::jointCount)
+        .function("setJointMotor",       &ManifoldSim::setJointMotor)
+        .function("setBodyOptions",      &ManifoldSim::setBodyOptions)
+        .function("wake",                &ManifoldSim::wake)
+        .function("isAwake",             &ManifoldSim::isAwake)
+        .function("mass",                &ManifoldSim::mass)
+        .function("applyLinearImpulse",  &ManifoldSim::applyLinearImpulse)
+        .function("setGravityWell",      &ManifoldSim::setGravityWell)
+        .function("clearGravityWell",    &ManifoldSim::clearGravityWell)
+        .function("setGravityScale",     &ManifoldSim::setGravityScale)
+        .function("contacts",            &ManifoldSim::contacts);
     // embind gives every class_ a .delete() automatically -- contract section 3's
     // sim.delete() needs no registration.
 }

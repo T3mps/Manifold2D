@@ -339,6 +339,165 @@ check('the existing hero API is unchanged', () => {
   return (g === 0 && b === 1 && t[0] === 22 && p.length === 9) || fail('hero api', { g, b, snaps: t[0], params: p.length });
 });
 
+// ---- the living-scene additions: gravity well, motion helpers, contacts, live motors ----
+
+check('the living-scene API is present', () => {
+  const need = ['wake', 'isAwake', 'mass', 'applyLinearImpulse', 'setBodyOptions', 'setGravityWell', 'clearGravityWell',
+    'setGravityScale', 'contacts', 'setJointMotor'];
+  const missing = need.filter((k) => typeof M.ManifoldSim.prototype[k] !== 'function');
+  return missing.length === 0 || fail('missing', missing);
+});
+
+check('setGravityWell: an inverse-square well pulls toward its centre and falls off with r^2', () => {
+  const s = new M.ManifoldSim(0, 4);
+  s.setGravityWell(0, 0, 2, 8, 0, 0, 0);
+  const a = s.addBody(DYNAMIC, CIRCLE, 2, 0, 0, 0.1, 0);
+  const b = s.addBody(DYNAMIC, CIRCLE, 0, -4, 0, 0.1, 0);
+  s.step(1 / 60);
+  const va = row(s, a)[3], vb = row(s, b)[4];
+  s.delete();
+  return (near(va, -8 / 60, 1e-3) && near(vb, 2 / 60, 1e-3)) || fail('well', { va, vb });
+});
+
+check('setGravityWell: the fade profile floats bodies beyond fadeEnd; clearGravityWell turns it off', () => {
+  const s = new M.ManifoldSim(0, 4);
+  s.setGravityWell(0, 0, 10, 10, 1, 12, 16);
+  const lo = s.addBody(DYNAMIC, CIRCLE, 0, -11, 0, 0.1, 0);
+  const hi = s.addBody(DYNAMIC, CIRCLE, 0, -17, 0, 0.1, 0);
+  s.step(1 / 60);
+  const vlo = row(s, lo)[4], vhi = row(s, hi)[4];
+  s.clearGravityWell();
+  s.step(1 / 60);
+  const vlo2 = row(s, lo)[4];
+  s.delete();
+  return (near(vlo, 10 / 60, 1e-3) && vhi === 0 && near(vlo2, vlo, 1e-6)) || fail('fade', { vlo, vhi, vlo2 });
+});
+
+check('setGravityScale and setBodyOptions(gravityScale) make bodies float or fall faster', () => {
+  const s = new M.ManifoldSim(10, 4);
+  const a = s.addBody(DYNAMIC, CIRCLE, 0, 0, 0, 0.1, 0);
+  s.setGravityScale(a, 0);
+  s.setBodyOptions(-1, false, 2);
+  const b = s.addBody(DYNAMIC, CIRCLE, 1, 0, 0, 0.1, 0);
+  s.setBodyOptions(-1, false, 1);
+  const c = s.addBody(DYNAMIC, CIRCLE, 2, 0, 0, 0.1, 0);
+  run(s, 60);
+  const va = row(s, a)[4], vb = row(s, b)[4], vc = row(s, c)[4];
+  s.delete();
+  return (va === 0 && near(vb, 20, 0.01) && near(vc, 10, 0.01)) || fail('scales', { va, vb, vc });
+});
+
+check('mass reports density x area for dynamics and 0 for statics or bad slots', () => {
+  const s = world();
+  s.setMaterial(2, 0.4, 0, 0);
+  const b = s.addBody(DYNAMIC, BOX, 0, 0, 0, 0.1, 0.1);
+  const m = [s.mass(b), s.mass(0), s.mass(999)];
+  s.delete();
+  return (near(m[0], 0.08, 1e-5) && m[1] === 0 && m[2] === 0) || fail('mass', m);
+});
+
+check('applyLinearImpulse acts at the centre of mass: velocity i/m, no spin', () => {
+  const s = new M.ManifoldSim(0, 4);
+  const b = s.addBody(DYNAMIC, BOX, 0, 0, 0, 0.1, 0.1);
+  s.applyLinearImpulse(b, 0.04, 0);
+  s.step(1 / 60);
+  const [, , , vx, , w] = row(s, b);
+  s.delete();
+  return (near(vx, 1, 1e-4) && w === 0) || fail('impulse', { vx, w });
+});
+
+check('isAwake and wake: a resting box falls asleep, wake() wakes it', () => {
+  const s = world();
+  const b = s.addBody(DYNAMIC, BOX, 0, 0.7, 0, 0.2, 0.2);
+  run(s, 180);
+  const slept = s.isAwake(b);
+  s.wake(b);
+  const woke = s.isAwake(b);
+  s.delete();
+  return (slept === false && woke === true) || fail('sleep', { slept, woke });
+});
+
+check('setTransform wakes a sleeping body: teleported into the air, it falls', () => {
+  const s = world();
+  const b = s.addBody(DYNAMIC, BOX, 0, 0.7, 0, 0.2, 0.2);
+  run(s, 180);
+  s.setTransform(b, 0, -1, 0);
+  run(s, 30);
+  const y = row(s, b)[1];
+  s.delete();
+  return y > -0.9 || fail('teleport', { y });
+});
+
+check('setMouseTarget wakes the dragged body: a sleeping box follows a moved target', () => {
+  const s = world();
+  const b = s.addBody(DYNAMIC, BOX, 0, 0.7, 0, 0.2, 0.2);
+  run(s, 180);
+  const id = s.addMouseJoint(b, 0, 0.7, 1000);
+  run(s, 60); // sits still at its target long enough to doze
+  s.setMouseTarget(id, 1, -1);
+  run(s, 90);
+  const [x, y] = row(s, b);
+  s.delete();
+  return (near(x, 1, 0.1) && near(y, -1, 0.15)) || fail('drag', { x, y });
+});
+
+check('setBodyOptions(sleepThreshold 0) keeps a resting body awake', () => {
+  const s = world();
+  s.setBodyOptions(0, false, 1);
+  const b = s.addBody(DYNAMIC, BOX, 0, 0.7, 0, 0.2, 0.2);
+  s.setBodyOptions(-1, false, 1);
+  run(s, 180);
+  const awake = s.isAwake(b);
+  s.delete();
+  return awake === true || fail('awake', { awake });
+});
+
+check('contacts reports a landing: the pair, a normal along y, an impulse and the approach speed', () => {
+  const s = world();
+  const b = s.addBody(DYNAMIC, CIRCLE, 0, 0, 0, 0.1, 0);
+  let hit = null;
+  for (let i = 0; i < 60 && !hit; i++) {
+    s.step(1 / 60);
+    const c = s.contacts().slice();
+    for (let k = 0; k + 7 < c.length + 1; k += 8) {
+      if ((c[k] === b || c[k + 1] === b) && c[k + 6] > 0) { hit = Array.from(c.slice(k, k + 8)); break; }
+    }
+  }
+  s.delete();
+  return (hit && near(Math.abs(hit[3]), 1, 0.01) && near(hit[5], 0.9, 0.05) && hit[7] > 2) || fail('landing', hit);
+});
+
+check('setJointMotor retargets a live wheel motor: the car stops, then reverses', () => {
+  const s = world();
+  const chassis = s.addBody(DYNAMIC, BOX, 0, 0.6, 0, 0.4, 0.08);
+  const w1 = s.addBody(DYNAMIC, CIRCLE, -0.3, 0.78, 0, 0.12, 0);
+  const w2 = s.addBody(DYNAMIC, CIRCLE, 0.3, 0.78, 0, 0.12, 0);
+  const j1 = s.addWheelJoint(chassis, w1, -0.3, 0.78, 0, 1, 5, 0.7, 8, 5);
+  const j2 = s.addWheelJoint(chassis, w2, 0.3, 0.78, 0, 1, 5, 0.7, 8, 5);
+  run(s, 90);
+  const x1 = row(s, chassis)[0];
+  const ok = [s.setJointMotor(j1, -8, 5), s.setJointMotor(j2, -8, 5), s.setJointMotor(999, 0, 0)];
+  run(s, 180);
+  const x2 = row(s, chassis)[0];
+  s.delete();
+  return (x1 > 0.5 && x2 < x1 - 0.5 && ok[0] && ok[1] && ok[2] === false) || fail('reverse', { x1, x2, ok });
+});
+
+check('determinism under a gravity well: two identical worlds stay bit-identical', () => {
+  const scene = () => {
+    const s = new M.ManifoldSim(0, 4);
+    s.setGravityWell(0, 30, 25, 10, 1, 27, 35);
+    for (let k = 0; k < 64; k++) { const a = -Math.PI / 2 + (k - 32) * 0.02; s.addBody(STATIC, BOX, 25.1 * Math.cos(a), 30 + 25.1 * Math.sin(a), a + Math.PI / 2, 0.42, 0.1); }
+    for (let i = 0; i < 30; i++) s.addBody(DYNAMIC, i % 4, (i % 6) * 0.5 - 1.5, -2 - Math.floor(i / 6) * 0.6, i * 0.3, 0.15, i % 4 === 3 ? 5 : 0.12);
+    run(s, 600);
+    const out = s.bodies().slice();
+    s.delete();
+    return out;
+  };
+  const a = scene(), b = scene();
+  return (a.length === b.length && a.every((v, i) => Object.is(v, b[i]))) || 'scenes diverged';
+});
+
 window.__results = results;
 document.getElementById('out').textContent = results.map((r) => `${r.ok ? 'PASS' : 'FAIL'}  ${r.name}${r.detail ? '\n      ' + r.detail : ''}`).join('\n');
 </script>
