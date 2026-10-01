@@ -137,6 +137,11 @@ namespace Manifold2D
             Real sleepThreshold = Real(-1);
             bool fixedRotation  = false;       // invInertia forced to 0
             bool bullet         = false;       // CCD clamp (P3); stored now
+            // Continuous collision safety factor (Box2D v3 b2BodyDef::safetyFactor,
+            // default 0.5): a dynamic body is FAST -- and its step is swept against
+            // static geometry -- when it moves more than safetyFactor * minExtent
+            // in a step (minExtent: its shapes' smallest centroid-to-surface distance).
+            Real safetyFactor   = Real(0.5);
 
             // ---- primary fixture filter + local transform (T6 fix) ----------
             //
@@ -256,6 +261,9 @@ namespace Manifold2D
             Real          restitutionThreshold = Real(1);
             // Box2D v3 b2DefaultWorldDef.maxContactPushSpeed (types.c:16): 3 m/s.
             Real          contactPushMaxVelocity = Real(3);
+            // Box2D v3 b2WorldDef::enableContinuous (default true): FAST non-bullet
+            // dynamic bodies are swept against static geometry (see BulletSweep).
+            bool          enableContinuous = true;
 
             // Box2D v3 max linear speed clamp (b2WorldDef::maximumLinearSpeed,
             // types.c:21 default 400 * lengthUnitsPerMeter). Bodies faster than
@@ -574,6 +582,11 @@ namespace Manifold2D
             // each bullet costs a shape cast per fixture per step.
             void SetBullet(BodyHandle h, bool bullet);
             [[nodiscard]] bool IsBullet(BodyHandle h) const noexcept;
+
+            // Continuous collision for fast non-bullet bodies vs statics
+            // (b2World_EnableContinuous); on by default (WorldDef::enableContinuous).
+            void EnableContinuous(bool on) noexcept { m_enableContinuous = on; }
+            [[nodiscard]] bool IsContinuousEnabled() const noexcept { return m_enableContinuous; }
 
             // Render-boundary lerp between prev and current step positions
             // (ports Body:drawPosition).
@@ -1079,6 +1092,7 @@ namespace Manifold2D
             {
                 m_prevX[i] = m_posX[i];
                 m_prevY[i] = m_posY[i];
+                m_prevAngle[i] = m_angle[i];
             }
             // Visit each LIVE island's member-slot list (Phase A sleep seam). A live
             // island has a non-empty member list; freed ids (empty) are skipped.
@@ -1374,6 +1388,7 @@ namespace Manifold2D
             // ---- SoA (port of the Lua FFI arrays; std::vector here) ---------
             std::vector<Real>          m_posX, m_posY;
             std::vector<Real>          m_prevX, m_prevY;
+            std::vector<Real>          m_prevAngle;           // start-of-step angle (the continuous sweep rotates)
             std::vector<Real>          m_velX, m_velY;
             std::vector<std::uint8_t>  m_btype;   // BodyType
             std::vector<std::uint8_t>  m_evtOn;   // per-body event gate
@@ -1398,6 +1413,8 @@ namespace Manifold2D
             std::vector<Real>          m_sleepThreshold;      // per-body sleep speed gate (m/s); see WorldDef/BodyDef
             std::vector<std::uint8_t>  m_awake;               // 1 = awake (integrates this step; P2.4 sleep clears to 0)
             std::vector<std::uint8_t>  m_bullet;              // CCD clamp (P3)
+            std::vector<Real>          m_minExtent;           // shapes' min centroid->surface dist (continuous test)
+            std::vector<Real>          m_safetyFactor;        // BodyDef::safetyFactor (continuous test)
 
             // ---- persistent island registry (Phase A) -----------------------
             // MOVED to IslandManager m_islandMgr (decomp step 1): m_islandId +
@@ -1487,6 +1504,7 @@ namespace Manifold2D
             Real          m_contactDampingRatio  = Real(10);
             Real          m_restitutionThreshold = Real(1);     // Box2D v3 (types.c:15)
             Real          m_contactPushMaxVelocity = Real(3);   // Box2D v3 (types.c:16)
+            bool          m_enableContinuous = true;            // Box2D v3 b2WorldDef::enableContinuous
             Real          m_maxLinearVelocity = Real(400);
             Real          m_sleepThresholdDefault  = Real(0.05); // WorldDef::sleepThreshold (Box2D v3, types.c:34)
 
@@ -1554,11 +1572,11 @@ namespace Manifold2D
             // conservative-advancement cast is fixed-iteration, no wall-clock).
             // Runs AFTER the solver commits dynamic positions and BEFORE events
             // (so contact events + island sleep see the clamped position).
-            void BulletSweep();
-            // The earliest time of impact in (0, 1] for one bullet fixture swept from
-            // `start` along `delta` (1 = no hit). See the definition for the rules.
-            [[nodiscard]] Real CcdFixtureToi(std::uint32_t body, std::uint32_t fi,
-                                             const Transform& start, const Vec2& delta);
+            void BulletSweep(Real dt);
+            // The earliest time of impact in (0, 1] for one fixture of a body swept over
+            // this step -- position AND rotation, start pose to end pose (1 = no hit).
+            // See the definition for the rules.
+            [[nodiscard]] Real CcdFixtureToi(std::uint32_t body, std::uint32_t fi, bool movers);
 
             // ---- query scratch (zero steady-state alloc) -------------------
             //

@@ -343,7 +343,7 @@ check('the existing hero API is unchanged', () => {
 
 check('the living-scene API is present', () => {
   const need = ['wake', 'isAwake', 'mass', 'applyLinearImpulse', 'setBodyOptions', 'setGravityWell', 'clearGravityWell',
-    'setGravityScale', 'contacts', 'setJointMotor', 'setBodyFilter', 'setBullet', 'isBullet'];
+    'setGravityScale', 'contacts', 'setJointMotor', 'setBodyFilter', 'setBullet', 'isBullet', 'enableContinuous'];
   const missing = need.filter((k) => typeof M.ManifoldSim.prototype[k] !== 'function');
   return missing.length === 0 || fail('missing', missing);
 });
@@ -516,6 +516,22 @@ check('a thin KINEMATIC wall stops a fast box like a static one (movers are pair
   const st = fire(STATIC), kin = fire(KINEMATIC);
   // the same impact; the static wall's stiffer contact (staticSoftness) only pushes back out sooner
   return (Math.abs(kin - st) < 0.01 && kin < 0) || fail('kinematic vs static', { st, kin });
+});
+
+check('continuous: a fast (non-bullet) box ends its impact step at a static wall, not inside it', () => {
+  const fire = (on) => {
+    const s = new M.ManifoldSim(0, 4);
+    s.enableContinuous(on);
+    s.addBody(STATIC, BOX, 0, 0, 0, 0.07, 2.5);
+    const b = s.addBody(DYNAMIC, BOX, -3, 0, 0, 0.15, 0.15);
+    s.setVelocity(b, 15, 0, 0);
+    let maxX = -9;
+    for (let i = 0; i < 60; i++) { s.step(1 / 60); maxX = Math.max(maxX, row(s, b)[0]); }
+    s.delete();
+    return maxX + 0.15 + 0.07; // deepest overlap
+  };
+  const on = fire(true), off = fire(false);
+  return (on < 0.02 && off > 0.05) || fail('continuous', { on, off });
 });
 
 check('setBullet: a fast spinning thin bar is stopped by a thin kinematic wall', () => {

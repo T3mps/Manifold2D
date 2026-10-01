@@ -60,6 +60,28 @@ namespace Manifold2D
 
         namespace
         {
+            // Box2D v3 b2ComputeShapeExtent's minExtent: the smallest distance from
+            // the shape's centroid to its surface (a polygon's nearest edge plane
+            // plus its rounding radius; a circle's or capsule's radius).
+            Real ShapeMinExtent(const Shape& s) noexcept
+            {
+                if (s.kind == ShapeKind::Aabb)
+                {
+                    return std::min(s.halfW, s.halfH) + s.radius;
+                }
+                if (s.kind == ShapeKind::Polygon && !s.normals.empty() && s.normals.size() == s.verts.size())
+                {
+                    Real m = Real(1e30);
+                    for (std::size_t i = 0; i < s.verts.size(); ++i)
+                    {
+                        const Vec2 d(s.verts[i].x - s.polyCentroid.x, s.verts[i].y - s.polyCentroid.y);
+                        m = std::min(m, s.normals[i].x * d.x + s.normals[i].y * d.y);
+                    }
+                    return std::max(Real(0), m) + s.radius;
+                }
+                return s.radius;
+            }
+
             std::unique_ptr<IBroadphase> MakeBroadphase(const WorldDef& def)
             {
                 // PORT + MODERNIZE: the Lua selected by string, defaulting to
@@ -133,6 +155,7 @@ namespace Manifold2D
             , m_contactDampingRatio(def.contactDampingRatio)
             , m_restitutionThreshold(def.restitutionThreshold)
             , m_contactPushMaxVelocity(def.contactPushMaxVelocity)
+            , m_enableContinuous(def.enableContinuous)
             , m_maxLinearVelocity(def.maxLinearVelocity)
             , m_sleepThresholdDefault(def.sleepThreshold)
             , m_solver(MakeSolver(def))
@@ -177,6 +200,7 @@ namespace Manifold2D
             m_posY.resize(next);
             m_prevX.resize(next);
             m_prevY.resize(next);
+            m_prevAngle.resize(next, Real(0));
             m_velX.resize(next);
             m_velY.resize(next);
             m_btype.resize(next);
@@ -205,6 +229,8 @@ namespace Manifold2D
             m_sleepThreshold.resize(next, m_sleepThresholdDefault);
             m_awake.resize(next, std::uint8_t(1));
             m_bullet.resize(next, std::uint8_t(0));
+            m_minExtent.resize(next, Real(0));
+            m_safetyFactor.resize(next, Real(0.5));
             // Island topology columns (m_islandId + SplitIsland scratch) now live in
             // IslandManager (decomp step 1); grow them through the seam.
             m_islandMgr.Grow(next);
@@ -419,6 +445,8 @@ namespace Manifold2D
             // m_localCenter. This is Box2D's sim->maxExtent, used by the sleep
             // velocity test ( |v| + |w|*maxExtent ). 0 for a body with no fixtures.
             Real maxExt = Real(0);
+            Real minExt = Real(0);
+            bool haveMin = false;
             const Real comX = m_localCenterX[bodySlot];
             const Real comY = m_localCenterY[bodySlot];
             for (const std::uint32_t fi : m_bodyFixtures[bodySlot])
@@ -428,6 +456,11 @@ namespace Manifold2D
                     continue; // dead slot (defensive)
                 }
                 const Shape& s = m_fxShape[fi];
+                // minExtent (Box2D b2ComputeShapeExtent): the shape's smallest
+                // centroid-to-surface distance; the body's is the min over shapes.
+                const Real me = ShapeMinExtent(s);
+                minExt = haveMin ? std::min(minExt, me) : me;
+                haveMin = true;
                 const Real la  = m_fxLocalAngle[fi];
                 const Real lc  = std::cos(la), ls = std::sin(la);
                 const Real lpx = m_fxLocalPosX[fi], lpy = m_fxLocalPosY[fi];
@@ -442,6 +475,7 @@ namespace Manifold2D
                 }
             }
             m_maxExtent[bodySlot] = maxExt;
+            m_minExtent[bodySlot] = minExt;
         }
 
         // ----------------------------------------------------------------
@@ -980,6 +1014,7 @@ namespace Manifold2D
             // mass/inertia -> never integrated/solved). A Dynamic body derives
             // mass + rotational inertia from Shape::ComputeMass(density).
             m_angle[idx]      = Real(0);
+            m_prevAngle[idx]  = Real(0);
             m_angVel[idx]     = Real(0);
             m_invMass[idx]    = Real(0);
             m_invInertia[idx] = Real(0);
@@ -994,6 +1029,7 @@ namespace Manifold2D
                                         : m_sleepThresholdDefault;
             m_awake[idx]      = 1;
             m_bullet[idx]     = def.bullet ? std::uint8_t(1) : std::uint8_t(0);
+            m_safetyFactor[idx] = def.safetyFactor;
 
             // ---- persistent island assignment (Phase A) ---------------------
             // A new DYNAMIC body is its own 1-body island; static/kinematic are
@@ -1764,6 +1800,7 @@ namespace Manifold2D
                 return;
             }
             const std::uint32_t i = h.index;
+            m_prevAngle[i] = angle; // a set angle is a teleport: no swept rotation through it
             m_angle[i] = angle;
             // A non-circle body's world AABB is rotation-aware. Statics never
             // re-register via Step, so refresh the static tree; movers refresh
@@ -1941,6 +1978,7 @@ namespace Manifold2D
                     // Snap harmlessly keeps the invariant for manual teleports.
                     m_prevX[i] = m_posX[i];
                     m_prevY[i] = m_posY[i];
+                    m_prevAngle[i] = m_angle[i];
 
                     // Kinematic bodies integrate ONCE per Step (unchanged from P2.1).
                     // Dynamic gravity/damping + position now live in the solver's
@@ -1972,6 +2010,7 @@ namespace Manifold2D
                 {
                     m_prevX[i] = m_posX[i];
                     m_prevY[i] = m_posY[i];
+                    m_prevAngle[i] = m_angle[i];
                 });
             }
 
@@ -2278,7 +2317,7 @@ namespace Manifold2D
             // position; the speculative margin (stage 2) handles fast dynamics
             // inline, with this as the safety net. CCD runs after the solver
             // commits positions, before island/events.
-            { ARCANE_STEPPROF_SCOPE(Bullet); BulletSweep(); }
+            { ARCANE_STEPPROF_SCOPE(Bullet); BulletSweep(dt); }
 
             // ---- stage 5: island sleep bookkeeping (P2.4) --------------------
             // Build the per-Step constraint graph (bodies = nodes, THIS step's
@@ -2342,60 +2381,131 @@ namespace Manifold2D
         // m_graph calls at the create/destroy/grow seams.
 
 
-        Real PhysicsWorld::CcdFixtureToi(std::uint32_t body, std::uint32_t fi,
-                                         const Transform& start, const Vec2& delta)
+        Real PhysicsWorld::CcdFixtureToi(std::uint32_t body, std::uint32_t fi, bool movers)
         {
             // Box2D v3 b2SolveContinuous + b2ContinuousQueryCallback, for one fixture:
+            //   * the sweep: the body's centre of mass moves from its start-of-step
+            //     to its end-of-step position while its angle turns from the start
+            //     to the end angle (Box2D's b2Sweep, linear in both); obstacles stand
+            //     at their end-of-step poses, as Box2D's do.
+            //   * time of impact by conservative advancement with the engine's own
+            //     ShapeDistance: from the current separation d, advance by
+            //     (d - target) / (|dc| + |da| * r), r the fixture's farthest point from
+            //     the centre of mass -- no point of the fixture can close faster, so the
+            //     advance never steps through contact. Stops within linearSlop.
             //   * obstacles: statics (and tile spans) always; kinematic and non-bullet
-            //     dynamic bodies when the bullet is DYNAMIC (a bullet sweeps the
-            //     kinematic and dynamic trees). Movers stand at their END-of-step
-            //     transforms, as Box2D's do. Other bullets are skipped (Box2D: "skip
-            //     bullets"), as are the bullet's own body and sensors.
-            //   * the collision filter decides, exactly as for contacts: each side's
-            //     category must be in the other's mask. (ShapeCast -- the query, Box2D's
-            //     b2World_CastShape -- ignores filters, so the sweep used to as well.)
-            //   * only 0 < t counts for a DYNAMIC bullet (Box2D: 0 < fraction): a
-            //     fixture already touching an obstacle at the start -- lying on a
-            //     floor, pressed against a wall -- is left to the contact solver, not
-            //     frozen in place. A KINEMATIC bullet (Manifold2D's own; Box2D has
-            //     none) has no solver to stop it, so a touch at the start still blocks
-            //     it when the step moves INTO the obstacle (the normal points from the
-            //     obstacle toward the bullet) -- held at a wall, free to slide along
-            //     a floor or move away.
+            //     dynamic bodies when `movers` (a dynamic bullet sweeps the kinematic
+            //     and dynamic trees). Other bullets, the body itself and sensors are
+            //     skipped; the collision filter decides exactly as for contacts.
+            //   * only 0 < t counts for a DYNAMIC body (Box2D: 0 < fraction); a sweep
+            //     that starts touching is retried with a small circle (B2_CORE_FRACTION
+            //     0.25 * minExtent) about the shape's centroid -- sliding along a
+            //     surface never touches it, but the body's core cannot pass through. A
+            //     KINEMATIC bullet (Manifold2D's own; no solver stops it) is held by a
+            //     start-touch when the step moves INTO it.
             const Shape& shape = m_fxShape[fi];
-            const Transform end{ Vec2(start.position.x + delta.x, start.position.y + delta.y), start.rotation };
-            const Aabb2 a = shape.ComputeAABB(start);
-            const Aabb2 b = shape.ComputeAABB(end);
+            const bool kinematic = static_cast<BodyType>(m_btype[body]) == BodyType::Kinematic;
+            const Vec2 lc(m_localCenterX[body], m_localCenterY[body]);
+            const Real a0 = m_prevAngle[body], a1 = m_angle[body];
+            const auto rot = [](Real ang, Vec2 v) { const Real c = std::cos(ang), sn = std::sin(ang); return Vec2(c * v.x - sn * v.y, sn * v.x + c * v.y); };
+            const Vec2 c0 = Vec2(m_prevX[body], m_prevY[body]) + rot(a0, lc);
+            const Vec2 c1 = Vec2(m_posX[body], m_posY[body]) + rot(a1, lc);
+            const Vec2 dc = c1 - c0;
+            const Real da = a1 - a0;
+            const Vec2 fxPos(m_fxLocalPosX[fi], m_fxLocalPosY[fi]);
+            const Real fxAng = m_fxLocalAngle[fi];
+            // the fixture's transform at sweep time t (local point `at`, in the fixture frame, as origin)
+            const auto poseAt = [&](Real t, Vec2 at) -> Transform
+            {
+                const Vec2 c(c0.x + dc.x * t, c0.y + dc.y * t);
+                const Real ang = a0 + da * t;
+                const Vec2 origin = c - rot(ang, lc);
+                const Transform fx = ComposeFixtureXf(origin, ang, fxPos, fxAng);
+                return Transform{ fx.position + rot(fx.rotation, at), fx.rotation };
+            };
+            // the farthest any point of `sh` (placed at `at` in the fixture) gets from the COM
+            const auto reachOf = [&](const Shape& sh, Vec2 at)
+            {
+                Real r = Real(0);
+                for (const Vec2& v : sh.verts)
+                {
+                    const Vec2 q = fxPos + rot(fxAng, at + v) - lc;
+                    r = std::max(r, std::sqrt(q.x * q.x + q.y * q.y));
+                }
+                return r + sh.radius;
+            };
+            const Real dcLen = std::sqrt(dc.x * dc.x + dc.y * dc.y);
+            constexpr Real kTarget = kLinearSlop;
+            constexpr Real kTol = Real(0.25) * kLinearSlop;
+            // conservative advancement of `sh` at `at`; dist(Transform) -> ShapeDistanceResult.
+            // Returns t in [0, 1] (1 = clear) and whether it was touching at the start.
+            const auto advance = [&](const Shape& sh, Vec2 at, const auto& dist, bool& startTouch, Vec2& startNormal) -> Real
+            {
+                const Real bound = dcLen + std::abs(da) * reachOf(sh, at);
+                Real t = Real(0);
+                for (int it = 0; it < 40; ++it)
+                {
+                    const ShapeDistanceResult r = dist(sh, poseAt(t, at));
+                    if (r.distance < kTarget + kTol)
+                    {
+                        if (it == 0) { startTouch = true; startNormal = r.normal; }
+                        return t;
+                    }
+                    if (!(bound > Real(0))) { return Real(1); }
+                    t += (r.distance - kTarget) / bound;
+                    if (t >= Real(1)) { return Real(1); }
+                }
+                return Real(1);
+            };
+            const Real coreR = kinematic ? Real(0) : Real(0.25) * ShapeMinExtent(shape);
+            const Shape core = MakeCircle(coreR > Real(0) ? coreR : Real(0.001));
+            const Vec2 centroid = shape.kind == ShapeKind::Polygon ? shape.polyCentroid : Vec2(Real(0), Real(0));
+            Real best = Real(1);
+            const auto test = [&](const auto& dist)
+            {
+                bool touch = false;
+                Vec2 n(Real(0), Real(0));
+                const Real t = advance(shape, Vec2(Real(0), Real(0)), dist, touch, n);
+                if (t >= Real(1)) { return; }
+                if (!touch)
+                {
+                    best = std::min(best, t);
+                    return;
+                }
+                if (kinematic)
+                {
+                    if (dc.x * n.x + dc.y * n.y < Real(0)) { best = Real(0); } // moving into it
+                    return;
+                }
+                if (coreR > Real(0))
+                {
+                    bool coreTouch = false;
+                    Vec2 cn(Real(0), Real(0));
+                    const Real tc = advance(core, centroid, dist, coreTouch, cn);
+                    if (!coreTouch && tc < best) { best = tc; }
+                }
+            };
+
+            // candidates: the fixture's swept box over the step
+            const Aabb2 boxA = shape.ComputeAABB(poseAt(Real(0), Vec2(Real(0), Real(0))));
+            const Aabb2 boxB = shape.ComputeAABB(poseAt(Real(1), Vec2(Real(0), Real(0))));
+            const Real spinPad = std::abs(da) * reachOf(shape, Vec2(Real(0), Real(0))); // mid-sweep corners
             Aabb2 swept;
-            swept.min = Vec2(std::min(a.min.x, b.min.x) - kShapeCastTol, std::min(a.min.y, b.min.y) - kShapeCastTol);
-            swept.max = Vec2(std::max(a.max.x, b.max.x) + kShapeCastTol, std::max(a.max.y, b.max.y) + kShapeCastTol);
+            swept.min = Vec2(std::min(boxA.min.x, boxB.min.x) - kShapeCastTol - spinPad, std::min(boxA.min.y, boxB.min.y) - kShapeCastTol - spinPad);
+            swept.max = Vec2(std::max(boxA.max.x, boxB.max.x) + kShapeCastTol + spinPad, std::max(boxA.max.y, boxB.max.y) + kShapeCastTol + spinPad);
 
             const std::uint32_t catA = m_fxFilterCat[fi], maskA = m_fxFilterMask[fi];
             const auto admits = [&](std::uint32_t fj)
             {
                 return (catA & m_fxFilterMask[fj]) != 0u && (m_fxFilterCat[fj] & maskA) != 0u;
             };
-            const bool kinematic = static_cast<BodyType>(m_btype[body]) == BodyType::Kinematic;
-            Real best = Real(1);
-            const auto consider = [&](const ShapeCastResult& r)
-            {
-                if (!r.hit) { return; }
-                if (r.t > Real(0))
-                {
-                    if (r.t < best) { best = r.t; }
-                }
-                else if (kinematic && delta.x * r.normal.x + delta.y * r.normal.y < Real(0))
-                {
-                    best = Real(0); // touching at the start and moving into it
-                }
-            };
-            const auto castFixture = [&](std::uint32_t fj)
+            const auto testFixture = [&](std::uint32_t fj)
             {
                 const std::uint32_t bj = m_fxBody[fj];
                 const Transform xf = ComposeFixtureXf(
                     Vec2(m_posX[bj], m_posY[bj]), m_angle[bj],
                     Vec2(m_fxLocalPosX[fj], m_fxLocalPosY[fj]), m_fxLocalAngle[fj]);
-                consider(::Manifold2D::Physics::ShapeCast(shape, start, delta, m_fxShape[fj], xf));
+                test([&](const Shape& sh, const Transform& sx) { return ShapeDistance(sh, sx, m_fxShape[fj], xf); });
             };
 
             StaticCandidates(swept, m_scratchSpans, m_scratchStatics, m_staticGridScratch);
@@ -2403,7 +2513,7 @@ namespace Manifold2D
             {
                 Vec2 poly[4];
                 AabbToCorners(span, poly);
-                consider(ShapeCastPoly(shape, start, delta, poly, 4));
+                test([&](const Shape& sh, const Transform& sx) { return ShapePolyDistance(sh, sx, poly, 4); });
             }
             for (const std::uint32_t idx : m_scratchStatics)
             {
@@ -2413,17 +2523,17 @@ namespace Manifold2D
                     for (const std::uint32_t fj : m_bodyFixtures[idx])
                     {
                         if (fj >= m_fxCount || m_fxGen[fj] == 0u || m_fxSensor[fj] != 0u || !admits(fj)) { continue; }
-                        castFixture(fj);
+                        testFixture(fj);
                     }
                 }
                 else // a fixtureless legacy static: its single shape, unfiltered
                 {
-                    consider(::Manifold2D::Physics::ShapeCast(shape, start, delta, m_shape[idx],
-                                                              Transform{ Vec2(m_posX[idx], m_posY[idx]), m_angle[idx] }));
+                    const Transform sx0{ Vec2(m_posX[idx], m_posY[idx]), m_angle[idx] };
+                    test([&](const Shape& sh, const Transform& sx) { return ShapeDistance(sh, sx, m_shape[idx], sx0); });
                 }
             }
 
-            if (static_cast<BodyType>(m_btype[body]) == BodyType::Dynamic)
+            if (movers && !kinematic)
             {
                 m_ccdMoverScratch.clear();
                 m_fixtureBroadphase->QueryAABB(swept, m_ccdMoverScratch);
@@ -2433,13 +2543,13 @@ namespace Manifold2D
                     const std::uint32_t bj = m_fxBody[fj];
                     if (bj == body || m_alive[bj] == 0 || m_sensor[bj] != 0 || m_bullet[bj] != 0) { continue; }
                     if (!admits(fj)) { continue; }
-                    castFixture(fj);
+                    testFixture(fj);
                 }
             }
             return best;
         }
 
-        void PhysicsWorld::BulletSweep()
+        void PhysicsWorld::BulletSweep(Real dt)
         {
             // P3.1 CCD bullet clamp (port of PhysicsWorld.lua:313-320). For each
             // alive `isBullet` body, cast the swept shape from its start-of-step
@@ -2452,9 +2562,24 @@ namespace Manifold2D
             // depenetration churn next Step).
             constexpr Real kBulletEpsilon = Real(0.001);
 
+            //
+            // Box2D v3 continuous for NON-bullets (b2FinalizeBodiesTask): an awake
+            // dynamic body is FAST when its motion this step -- the larger of its
+            // displacement plus spin times maxExtent and (|v| + |w| maxExtent) dt --
+            // exceeds safetyFactor * minExtent; a fast body is swept like a bullet
+            // but against STATIC geometry only (b2SolveContinuous queries only the
+            // static tree for non-bullets). Without it a hard hit on a static wall
+            // overshot the speculative gap in the impact step (the sequential
+            // two-point solve spins the body) and sank in by ~0.1 m.
             for (std::uint32_t i = 0; i < m_count; ++i)
             {
-                if (m_alive[i] == 0 || m_bullet[i] == 0)
+                if (m_alive[i] == 0)
+                {
+                    continue;
+                }
+                const bool bullet = m_bullet[i] != 0;
+                const bool dynamic = static_cast<BodyType>(m_btype[i]) == BodyType::Dynamic;
+                if (!bullet && !(m_enableContinuous && dynamic && m_awakeIndex[i] != kNotAwake))
                 {
                     continue;
                 }
@@ -2467,6 +2592,17 @@ namespace Manifold2D
                 if (delta.x == Real(0) && delta.y == Real(0))
                 {
                     continue;
+                }
+                if (!bullet)
+                {
+                    const Real spin = std::abs(m_angVel[i]) * m_maxExtent[i];
+                    const Real vel = std::sqrt(m_velX[i] * m_velX[i] + m_velY[i] * m_velY[i]);
+                    const Real moved = std::sqrt(delta.x * delta.x + delta.y * delta.y) + spin * dt;
+                    const Real maxMotion = std::max(moved, (vel + spin) * dt);
+                    if (!(maxMotion > m_safetyFactor[i] * m_minExtent[i]))
+                    {
+                        continue; // not fast: safe to advance
+                    }
                 }
 
                 // INVARIANT: bullets are always movers (Kinematic or Dynamic);
@@ -2511,11 +2647,7 @@ namespace Manifold2D
                         }
                         // Fixture start-of-step world pos = prev + R(angle)*local;
                         // world angle = bodyAngle + fixtureLocalAngle.
-                        const Transform fxStart = ComposeFixtureXf(
-                            prev, bodyAngle,
-                            Vec2(m_fxLocalPosX[fi], m_fxLocalPosY[fi]),
-                            m_fxLocalAngle[fi]);
-                        const Real t = CcdFixtureToi(i, fi, fxStart, delta);
+                        const Real t = CcdFixtureToi(i, fi, /*movers=*/bullet);
                         if (t < bestT)
                         {
                             bestT   = t;
@@ -2548,9 +2680,28 @@ namespace Manifold2D
                 // The clamp is applied to the BODY position with the body's delta
                 // (the fixture offsets ride along rigidly with the body).
                 const Real clamp = std::max(Real(0), bestT - kBulletEpsilon);
-                const Vec2 clamped = prev + delta * clamp;
+                // the pose at the time of impact: the centre of mass and the angle both
+                // interpolated (Box2D: c = lerp(c1, c2, t), q = nlerp(q1, q2, t))
+                const Real ang = m_prevAngle[i] + (m_angle[i] - m_prevAngle[i]) * clamp;
+                const Vec2 lcI(m_localCenterX[i], m_localCenterY[i]);
+                const auto rotI = [](Real a, Vec2 v) { const Real c = std::cos(a), sn = std::sin(a); return Vec2(c * v.x - sn * v.y, sn * v.x + c * v.y); };
+                const Vec2 cS = prev + rotI(m_prevAngle[i], lcI), cE = curr + rotI(m_angle[i], lcI);
+                const Vec2 cT = cS + (cE - cS) * clamp;
+                const Vec2 clamped = cT - rotI(ang, lcI);
                 m_posX[i] = clamped.x;
                 m_posY[i] = clamped.y;
+                m_angle[i] = ang;
+                // Time loss (Box2D b2SolveContinuous): the body keeps its velocity but
+                // gives back the gravity it gained over the part of the step it lost
+                // (world gravity plus the well, scaled like the integrator's).
+                if (dynamic)
+                {
+                    Vec2 g(m_gravityX, m_gravityY);
+                    if (m_gravityWell.enabled) { g = g + GravityWellAccel(clamped); }
+                    const Real lost = (Real(1) - clamp) * dt * m_gravityScale[i];
+                    m_velX[i] -= lost * g.x;
+                    m_velY[i] -= lost * g.y;
+                }
                 // Unconditional: the assert above guarantees this is always a
                 // mover (never Static), so the broadphase update always applies.
                 // UpdateMoverProxies keeps all per-fixture mover-broadphase proxies

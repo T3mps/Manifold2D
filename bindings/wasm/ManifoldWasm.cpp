@@ -631,6 +631,8 @@ public:
             m_world->SetBullet(h, bullet);
         }
     }
+    // Continuous collision for fast non-bullet bodies vs statics (b2World_EnableContinuous; on by default).
+    void enableContinuous(bool on) { m_world->EnableContinuous(on); }
     bool isBullet(int slot) const
     {
         BodyHandle h;
@@ -1053,6 +1055,7 @@ EMSCRIPTEN_BINDINGS(manifold)
         .function("setBodyFilter",       &ManifoldSim::setBodyFilter)
         .function("setBullet",           &ManifoldSim::setBullet)
         .function("isBullet",            &ManifoldSim::isBullet)
+        .function("enableContinuous",    &ManifoldSim::enableContinuous)
         .function("contacts",            &ManifoldSim::contacts);
     // embind gives every class_ a .delete() automatically -- contract section 3's
     // sim.delete() needs no registration.
