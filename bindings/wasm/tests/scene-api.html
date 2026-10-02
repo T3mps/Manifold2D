@@ -519,20 +519,20 @@ check('a thin KINEMATIC wall stops a fast box (movers are paired before contact)
   return (kin < 0 && st <= kin) || fail('kinematic vs static', { st, kin });
 });
 
-check('continuous: a fast (non-bullet) box ends its impact step at a static wall, not inside it', () => {
-  const fire = (on) => {
+check('continuous: a bar spinning fast beside a static wall stops at it (switched off, its tip goes in)', () => {
+  const reach = (on) => {
     const s = new M.ManifoldSim(0, 4);
     s.enableContinuous(on);
     s.addBody(STATIC, BOX, 0, 0, 0, 0.07, 2.5);
-    const b = s.addBody(DYNAMIC, BOX, -3, 0, 0, 0.15, 0.15);
-    s.setVelocity(b, 15, 0, 0);
-    let maxX = -9;
-    for (let i = 0; i < 60; i++) { s.step(1 / 60); maxX = Math.max(maxX, row(s, b)[0]); }
+    const bar = s.addBody(DYNAMIC, BOX, -0.45, 0, Math.PI / 2, 0.5, 0.02);
+    s.setVelocity(bar, 0, 0, 30);
+    let r = -9;
+    for (let i = 0; i < 20; i++) { s.step(1 / 60); const q = row(s, bar); r = Math.max(r, q[0] + 0.5 * Math.abs(Math.cos(q[2]))); }
     s.delete();
-    return maxX + 0.15 + 0.07; // deepest overlap
+    return r; // the farthest the tip got in x (wall face at -0.07)
   };
-  const on = fire(true), off = fire(false);
-  return (on < 0.02 && off > 0.05) || fail('continuous', { on, off });
+  const on = reach(true), off = reach(false);
+  return (on < -0.05 && off > -0.045) || fail('continuous', { on, off });
 });
 
 check('setBullet: a fast spinning thin bar is stopped by a thin kinematic wall', () => {
