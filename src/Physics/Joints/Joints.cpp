@@ -137,6 +137,12 @@ namespace Manifold2D
             const Real beta = kJointBeta * InvDt(dt);
             m_biasX = beta * (pbx - pax);
             m_biasY = beta * (pby - pay);
+            // the soft point constraint's start-of-step state (m_linearImpulse is kept:
+            // it warm-starts the next step, as Box2D's does)
+            m_rA0 = m_rA; m_rB0 = m_rB;
+            m_dc0 = Vec2(pb.x - pa.x, pb.y - pa.y);
+            m_dpA = m_dpB = Vec2(Real(0), Real(0));
+            m_daA = m_daB = Real(0);
         }
 
         void RevoluteJoint::SolveVelocity(PhysicsWorld& w)
@@ -148,13 +154,63 @@ namespace Manifold2D
             {
                 if (m_pass == 1)
                 {
-                    m_deltaAngle += (JointMath::AngVel(w, m_ib) - JointMath::AngVel(w, m_ia)) * m_h;
+                    const Real wa = JointMath::AngVel(w, m_ia), wb = JointMath::AngVel(w, m_ib);
+                    const Vec2 va = JointMath::Vat(w, m_ia, Real(0), Real(0)), vb = JointMath::Vat(w, m_ib, Real(0), Real(0));
+                    m_deltaAngle += (wb - wa) * m_h;
+                    m_daA += wa * m_h; m_daB += wb * m_h;
+                    m_dpA = Vec2(m_dpA.x + va.x * m_h, m_dpA.y + va.y * m_h);
+                    m_dpB = Vec2(m_dpB.x + vb.x * m_h, m_dpB.y + vb.y * m_h);
                 }
                 useBias = m_pass == 0;
+                if (m_pass == 0) { WarmStartPoint(w); }
                 ++m_pass;
             }
             SolveAngular(w, useBias);
-            SolvePoint(w);
+            if (m_substepping) { SolvePointSoft(w, useBias); }
+            else { SolvePoint(w); }
+        }
+
+        namespace
+        {
+            Vec2 RotateBy(Real a, Vec2 v) noexcept
+            {
+                const Real c = std::cos(a), s = std::sin(a);
+                return Vec2(c * v.x - s * v.y, s * v.x + c * v.y);
+            }
+        } // namespace
+
+        void RevoluteJoint::WarmStartPoint(PhysicsWorld& w)
+        {
+            const Vec2 rA = RotateBy(m_daA, m_rA0), rB = RotateBy(m_daB, m_rB0);
+            JointMath::ApplyAt(w, m_ib, m_linearImpulse.x, m_linearImpulse.y, rB.x, rB.y);
+            JointMath::ApplyAt(w, m_ia, -m_linearImpulse.x, -m_linearImpulse.y, rA.x, rA.y);
+        }
+
+        void RevoluteJoint::SolvePointSoft(PhysicsWorld& w, bool useBias)
+        {
+            // b2SolveRevoluteJoint's point-to-point block: the current arms, the
+            // current separation (start offset + in-flight motion + arms), soft on
+            // the biased pass, rigid and bias-free on the relax pass
+            const Vec2 rA = RotateBy(m_daA, m_rA0), rB = RotateBy(m_daB, m_rB0);
+            const Vec2 va = JointMath::Vat(w, m_ia, rA.x, rA.y);
+            const Vec2 vb = JointMath::Vat(w, m_ib, rB.x, rB.y);
+            Vec2 bias(Real(0), Real(0));
+            Real massScale = Real(1), impulseScale = Real(0);
+            if (useBias)
+            {
+                const Vec2 sep(m_dc0.x + (m_dpB.x - m_dpA.x) + (rB.x - rA.x),
+                               m_dc0.y + (m_dpB.y - m_dpA.y) + (rB.y - rA.y));
+                bias = Vec2(m_softBiasRate * sep.x, m_softBiasRate * sep.y);
+                massScale = m_softMassScale;
+                impulseScale = m_softImpulseScale;
+            }
+            const Vec2 b = JointMath::SolvePoint(w, m_ia, m_ib, rA.x, rA.y, rB.x, rB.y,
+                                                 vb.x - va.x + bias.x, vb.y - va.y + bias.y);
+            const Vec2 impulse(-massScale * b.x - impulseScale * m_linearImpulse.x,
+                               -massScale * b.y - impulseScale * m_linearImpulse.y);
+            m_linearImpulse = Vec2(m_linearImpulse.x + impulse.x, m_linearImpulse.y + impulse.y);
+            JointMath::ApplyAt(w, m_ib, impulse.x, impulse.y, rB.x, rB.y);
+            JointMath::ApplyAt(w, m_ia, -impulse.x, -impulse.y, rA.x, rA.y);
         }
 
         void RevoluteJoint::SolveAngular(PhysicsWorld& w, bool useBias)

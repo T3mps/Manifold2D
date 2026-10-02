@@ -68,12 +68,21 @@ namespace Manifold2D
         //     (b2PrepareJoint: 60 Hz clamped to 0.25 / h, damping ratio 2), the
         //     push-out only on the biased pass (useBias).
         //
-        // The joint angle through a step: Box2D reads it from the bodies'
-        // in-flight deltaRotation; this engine's joints see velocities only, so
-        // the joint integrates the relative angular velocity itself. SoftStep runs
-        // joint pass #1 after the warm start (the biased pass) and pass #2 right
-        // after integrating positions (the relax pass): the velocities pass #2
-        // sees are the ones just integrated, so it adds (wB - wA) * h first.
+        // The point constraint under SoftStep is Box2D's too: soft (the joint
+        // constraint softness), solved against the CURRENT separation each
+        // sub-step, its push-out on the biased pass only, and warm started from
+        // its accumulated impulse. (The Lua port's Baumgarte bias was computed
+        // once per step from the start-of-step separation and applied again in
+        // every sub-step: a light chain under a heavy load stretched 3 cm a joint
+        // and zig-zagged.) Without sub-steps (no BeginSubstep) the Lua point
+        // constraint runs unchanged.
+        //
+        // In-flight state through a step: Box2D reads the bodies' deltaPosition
+        // and deltaRotation; this engine's joints see velocities only, so the
+        // joint integrates them itself. SoftStep runs joint pass #1 after the
+        // warm start (the biased pass) and pass #2 right after integrating
+        // positions (the relax pass): the velocities pass #2 sees are the ones
+        // just integrated, so it adds v * h and w * h first.
         // ================================================================
         class RevoluteJoint : public Joint
         {
@@ -120,7 +129,9 @@ namespace Manifold2D
         protected:
             // the angular parts (spring, motor, limit), then the point constraint: Box2D's order
             void SolveAngular(PhysicsWorld& w, bool useBias);
-            void SolvePoint(PhysicsWorld& w);
+            void SolvePoint(PhysicsWorld& w);                     // the Lua port (no sub-steps)
+            void SolvePointSoft(PhysicsWorld& w, bool useBias);   // Box2D's (under SoftStep)
+            void WarmStartPoint(PhysicsWorld& w);
 
             BodyHandle    m_hA, m_hB;
             std::uint32_t m_ia = kInvalidSlot, m_ib = kInvalidSlot;
@@ -148,6 +159,12 @@ namespace Manifold2D
             Real m_softBiasRate = Real(0), m_softMassScale = Real(1), m_softImpulseScale = Real(0);
             Real m_springImpulse = Real(0), m_motorImpulse = Real(0);
             Real m_lowerImpulse = Real(0), m_upperImpulse = Real(0);
+            // the soft point constraint: start-of-step arms and origin offset, the
+            // bodies' in-flight motion, and the accumulated (warm-started) impulse
+            Vec2 m_rA0{ Real(0), Real(0) }, m_rB0{ Real(0), Real(0) }, m_dc0{ Real(0), Real(0) };
+            Vec2 m_dpA{ Real(0), Real(0) }, m_dpB{ Real(0), Real(0) };
+            Real m_daA = Real(0), m_daB = Real(0);
+            Vec2 m_linearImpulse{ Real(0), Real(0) };
             bool m_substepping = false;      // the solver calls BeginSubstep (SoftStep)
             int  m_pass = 0;                 // joint pass within the sub-step
         };
