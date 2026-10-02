@@ -2587,9 +2587,10 @@ namespace Manifold2D
                 const Vec2 prev(m_prevX[i], m_prevY[i]);
                 const Vec2 curr(m_posX[i], m_posY[i]);
                 const Vec2 delta = curr - prev;
-                // No net travel this Step -> nothing to clamp (ShapeCast also
-                // guards a near-zero delta, but skip the candidate gather too).
-                if (delta.x == Real(0) && delta.y == Real(0))
+                // No net travel AND no turn this Step -> nothing to sweep. (A body
+                // spinning in place moves its extremities a long way while its origin
+                // stays put; the sweep rotates, so it must still run.)
+                if (delta.x == Real(0) && delta.y == Real(0) && m_angle[i] == m_prevAngle[i])
                 {
                     continue;
                 }
