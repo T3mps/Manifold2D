@@ -360,6 +360,16 @@ namespace Manifold2D
             {
                 return;
             }
+            // A pair the collision filter keeps apart never wakes anything (Box2D:
+            // b2ShouldShapesCollide gates the pair before a contact exists, and only
+            // contacts wake islands). Without this, a never-sleeping body of a
+            // non-colliding category standing beside a resting stack re-woke it
+            // every step.
+            if (((w.m_fxFilterCat[fa] & w.m_fxFilterMask[fb]) == 0u) ||
+                ((w.m_fxFilterCat[fb] & w.m_fxFilterMask[fa]) == 0u))
+            {
+                return;
+            }
             const bool da = static_cast<BodyType>(w.m_btype[a]) == BodyType::Dynamic;
             const bool db = static_cast<BodyType>(w.m_btype[b]) == BodyType::Dynamic;
             if (!da && !db)

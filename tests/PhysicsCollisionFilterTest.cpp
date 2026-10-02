@@ -142,3 +142,45 @@ TEST_CASE("Collision filter: default category/mask (cat=1 mask=all) collide",
     CHECK(w.DebugContactCount() >= 1);
     CHECK(w.DebugHasContact(bA, bB));
 }
+
+// A filtered-out pair never wakes a sleeper either (Box2D: b2ShouldShapesCollide gates
+// the pair before any contact exists, and only contacts wake islands). Before the fix
+// the mover-pair wake ran on fat-AABB overlap without the filter: a never-sleeping body
+// of a non-colliding category standing beside a resting stack re-woke it every step.
+TEST_CASE("Collision filter: a non-colliding mover beside a sleeping body does not wake it",
+          "[physics][filter][island]")
+{
+    const auto run = [](std::uint32_t walkerMask)
+    {
+        WorldDef wd;
+        PhysicsWorld w{ wd };
+        BodyDef g;
+        g.type = BodyType::Static;
+        g.position = Vec2(Real(0), Real(0.5));
+        g.shape = MakeAabb(Real(10), Real(0.5));
+        w.AddBody(g);
+        BodyDef c;
+        c.type = BodyType::Dynamic;
+        c.position = Vec2(Real(0), Real(-0.2));
+        c.shape = MakePolygon(std::vector<Vec2>{ Vec2(-0.2f, -0.2f), Vec2(0.2f, -0.2f), Vec2(0.2f, 0.2f), Vec2(-0.2f, 0.2f) });
+        c.categoryBits = 2u;
+        c.maskBits = 1u | 2u | 4u; // the crate would collide with category 4 -- if 4 collided with it
+        const BodyHandle crate = w.AddBody(c);
+        for (int i = 0; i < 120; ++i) { w.Step(Real(1) / Real(60)); }
+        REQUIRE_FALSE(w.IsAwake(crate));
+        // a never-sleeping body (sleepThreshold 0), standing still right beside it
+        BodyDef k;
+        k.type = BodyType::Dynamic;
+        k.position = Vec2(Real(0.25), Real(-0.25));
+        k.shape = MakeCircle(Real(0.05));
+        k.sleepThreshold = Real(0);
+        k.categoryBits = 4u;
+        k.maskBits = walkerMask;
+        w.AddBody(k);
+        int awake = 0;
+        for (int i = 0; i < 60; ++i) { w.Step(Real(1) / Real(60)); awake += w.IsAwake(crate) ? 1 : 0; }
+        return awake;
+    };
+    CHECK(run(1u) == 0);      // its mask leaves out crates: filtered, so it never wakes one
+    CHECK(run(1u | 2u) > 0);  // both masks agree: it wakes the crate (it is awake and beside it)
+}
