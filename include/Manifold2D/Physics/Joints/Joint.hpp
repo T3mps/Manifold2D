@@ -40,6 +40,11 @@ namespace Manifold2D
         // Baumgarte positional-correction factor folded into the joint velocity
         // constraints (Joints.lua BETA = 0.2). Shared by every joint type.
         inline constexpr Real kJointBeta = Real(0.2);
+        // Box2D v3 joint constraint softness (b2DefaultJointDef: constraintHertz 60,
+        // constraintDampingRatio 2; b2PrepareJoint clamps the hertz to 0.25 / h).
+        // Used by the revolute limit's soft push-out.
+        inline constexpr Real kJointConstraintHertz = Real(60);
+        inline constexpr Real kJointConstraintDampingRatio = Real(2);
 
         // Mouse-joint critically-damped spring constants (Joints.lua FREQ/ZETA).
         inline constexpr Real kMouseFreq = Real(5);
@@ -80,6 +85,11 @@ namespace Manifold2D
         //              maxMotorTorque).
         //   Motor    : motorSpeed (target relative angular velocity of B vs A) +
         //              maxMotorTorque (impulse clamp).
+        //   Revolute (Box2D v3 b2RevoluteJointDef): referenceAngle + optional
+        //              limit (enableLimit, lowerAngle, upperAngle), spring
+        //              (enableSpring, frequencyHz, dampingRatio, targetAngle) and
+        //              motor (enableMotor, motorSpeed, maxMotorTorque as a torque
+        //              in N m: the impulse is clamped to h * maxMotorTorque).
         struct JointDef
         {
             JointKind  kind = JointKind::Distance;
@@ -92,6 +102,21 @@ namespace Manifold2D
             // Revolute / Weld / Wheel: world anchor point at creation.
             Vec2 anchor{ Real(0), Real(0) };
 
+            // Revolute: the joint angle is angleB - angleA - referenceAngle
+            // (Box2D's angle between the joint frames). Box2D's default is 0, so the
+            // joint angle is the raw relative angle; pass the creation-time relative
+            // angle to measure the limits and the spring from the pose at creation.
+            Real referenceAngle = Real(0);
+            // Revolute limit: lowerAngle <= joint angle <= upperAngle (radians;
+            // Box2D documents a usable range of about +-0.99 pi).
+            bool enableLimit = false;
+            Real lowerAngle  = Real(0);
+            Real upperAngle  = Real(0);
+            // Revolute spring: drives the joint angle to targetAngle, soft at
+            // (frequencyHz, dampingRatio) below.
+            bool enableSpring = false;
+            Real targetAngle  = Real(0);
+
             // Prismatic / Wheel: world axis (direction). Normalized at Prepare.
             Vec2 axis{ Real(1), Real(0) };
 
@@ -102,7 +127,8 @@ namespace Manifold2D
             Vec2 target{ Real(0), Real(0) };
             Real maxForce = Real(1e6);
 
-            // Wheel suspension spring (b2WheelJoint). frequencyHz <= 0 -> a rigid
+            // Wheel suspension spring (b2WheelJoint), and the Revolute spring when
+            // enableSpring. frequencyHz <= 0 -> a rigid
             // axis constraint (no suspension travel). dampingRatio is the spring's
             // zeta (1 = critically damped).
             Real frequencyHz  = Real(4);

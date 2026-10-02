@@ -344,6 +344,37 @@ namespace Manifold2D
             BodyHandle exclude = kInvalidBody;
         };
 
+        // ----------------------------------------------------------------
+        // QueryFilter: which fixtures a world query sees (Box2D v3 b2QueryFilter).
+        // A fixture is a candidate when (its categoryBits & maskBits) != 0 AND
+        // (its maskBits & categoryBits) != 0 -- b2ShouldQueryShape: the query is
+        // a body of category `categoryBits` that collides with `maskBits`, and the
+        // fixture must collide with it too. `exclude` skips one body (Box2D does
+        // that in the query callback; the closest-hit query has no callback).
+        // ----------------------------------------------------------------
+        struct QueryFilter
+        {
+            std::uint32_t categoryBits = 1u;           // B2_DEFAULT_CATEGORY_BITS
+            std::uint32_t maskBits     = 0xFFFFFFFFu;  // B2_DEFAULT_MASK_BITS
+            BodyHandle    exclude      = kInvalidBody;
+        };
+
+        // ----------------------------------------------------------------
+        // RayResult: CastRayClosest's hit (Box2D v3 b2RayResult). `fixture` is
+        // invalid for a tile span (no fixture) or a fixtureless legacy body;
+        // `body` is kInvalidBody for a tile span. `normal` is the unit surface
+        // normal at `point`, facing back along the ray; `fraction` is the share
+        // of the translation travelled to `point`.
+        // ----------------------------------------------------------------
+        struct RayResult
+        {
+            BodyHandle    body = kInvalidBody;
+            FixtureHandle fixture{};
+            Vec2          point{ Real(0), Real(0) };
+            Vec2          normal{ Real(0), Real(0) };
+            Real          fraction = Real(0);
+        };
+
         // A body slot NOT in the awake-set (static, kinematic, sleeping, or dead).
         // Sentinel stored in m_awakeIndex[slot] when the slot is not a member of
         // m_awakeBodies. Must not collide with any real dense position index.
@@ -686,6 +717,20 @@ namespace Manifold2D
             [[nodiscard]] std::optional<RaycastHit>
             Raycast(const Vec2& from, const Vec2& to,
                     const RaycastOpts& opts = {}) const;
+
+            // The nearest fixture the ray origin -> origin + translation hits
+            // (Box2D v3 b2World_CastRayClosest). Candidates: tile spans, static
+            // bodies and the mover fixtures (kinematic + dynamic), gathered by the
+            // ray's bounding box from the static index and the mover broadphase
+            // (so it works with any BroadphaseKind; Box2D walks its trees along the
+            // ray instead, which only pays for long rays). Sensors are skipped and
+            // the filter applies to each fixture; tile spans and fixtureless legacy
+            // bodies have no filter. A fixture containing the origin is not
+            // reported (Box2D's shape ray casts miss from inside). std::nullopt for
+            // a miss or a zero translation.
+            [[nodiscard]] std::optional<RayResult>
+            CastRayClosest(const Vec2& origin, const Vec2& translation,
+                           const QueryFilter& filter = {}) const;
 
             // Line-of-sight (PORT of lineOfSight): true iff NO sight-blocking
             // (TALL) cell lies between `from` and `to`. Equivalent to
@@ -1596,6 +1641,7 @@ namespace Manifold2D
             mutable std::vector<Aabb2>         m_scratchSpans;
             mutable std::vector<std::uint32_t> m_scratchStatics;
             std::vector<std::uint32_t>         m_ccdMoverScratch; // CcdFixtureToi's mover candidates
+            mutable std::vector<std::uint32_t> m_rayMoverScratch; // CastRayClosest's mover candidates
 
             // ---- persistent contact pool (collision-rebuild Phase 3, Task 2/4) --
             //

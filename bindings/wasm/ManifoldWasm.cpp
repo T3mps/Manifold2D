@@ -32,7 +32,9 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -549,6 +551,12 @@ public:
             pj->SetMotorSpeed(sp);
             pj->SetMaxMotorForce(tq);
         }
+        else if (auto* rj = revolute(j))
+        {
+            rj->EnableMotor(tq > Real(0)); // rad/s, N m (b2RevoluteJoint_SetMaxMotorTorque)
+            rj->SetMotorSpeed(sp);
+            rj->SetMaxMotorTorque(tq);
+        }
         else
         {
             return false;
@@ -556,6 +564,81 @@ public:
         if (m_world->IsValid(j->HandleA())) { m_world->Wake(j->HandleA()); }
         if (m_world->IsValid(j->HandleB())) { m_world->Wake(j->HandleB()); }
         return true;
+    }
+
+    // ---- revolute joint (b2RevoluteJoint_*) --------------------------------
+    // The joint angle is angleB - angleA - reference (Box2D: the angle between the
+    // joint frames; the reference starts at 0, so pass the relative angle at
+    // creation to measure the limits and the spring from that pose).
+    bool setRevoluteReference(int id, float angle)
+    {
+        RevoluteJoint* rj = revolute(joint(id));
+        if (rj == nullptr) { return false; }
+        rj->SetReferenceAngle(static_cast<Real>(angle));
+        wakeJoint(rj);
+        return true;
+    }
+    // lower <= joint angle <= upper (radians), or off.
+    bool setRevoluteLimits(int id, bool enable, float lower, float upper)
+    {
+        RevoluteJoint* rj = revolute(joint(id));
+        if (rj == nullptr) { return false; }
+        rj->EnableLimit(enable);
+        rj->SetLimits(static_cast<Real>(lower), static_cast<Real>(upper));
+        wakeJoint(rj);
+        return true;
+    }
+    // A rotational spring-damper driving the joint angle to `target` (radians),
+    // at `hertz` with `dampingRatio` (1 = critical), or off.
+    bool setRevoluteSpring(int id, bool enable, float hertz, float dampingRatio, float target)
+    {
+        RevoluteJoint* rj = revolute(joint(id));
+        if (rj == nullptr) { return false; }
+        rj->EnableSpring(enable);
+        rj->SetSpring(static_cast<Real>(hertz), static_cast<Real>(dampingRatio));
+        rj->SetTargetAngle(static_cast<Real>(target));
+        wakeJoint(rj);
+        return true;
+    }
+    // The revolute joint's current angle (radians); NaN for any other joint.
+    float jointAngle(int id) const
+    {
+        const RevoluteJoint* rj = revolute(joint(id));
+        return rj != nullptr ? static_cast<float>(rj->JointAngle(*m_world)) : std::numeric_limits<float>::quiet_NaN();
+    }
+
+    // ---- queries -----------------------------------------------------------
+    // The nearest fixture the ray (ox, oy) -> (ox + tx, oy + ty) hits
+    // (b2World_CastRayClosest): a fixture is seen when its category is in `mask`
+    // and its mask holds `category` (b2QueryFilter); excludeSlot (-1 = none)
+    // skips one body; sensors and fixtures containing the origin are skipped.
+    // Returns [hit, body, fixture, px, py, nx, ny, fraction] -- hit 0 for a miss;
+    // body -1 for a tile span; the normal faces back along the ray. A
+    // typed_memory_view: copy before the next call.
+    emscripten::val castRayClosest(float ox, float oy, float tx, float ty,
+                                   std::uint32_t category, std::uint32_t mask, int excludeSlot)
+    {
+        QueryFilter f;
+        f.categoryBits = category;
+        f.maskBits = mask;
+        BodyHandle ex;
+        if (excludeSlot >= 0 && handle(excludeSlot, ex)) { f.exclude = ex; }
+        const std::optional<RayResult> r = m_world->CastRayClosest(
+            Vec2(static_cast<Real>(ox), static_cast<Real>(oy)),
+            Vec2(static_cast<Real>(tx), static_cast<Real>(ty)), f);
+        m_rayBuf.fill(0.0f);
+        if (r)
+        {
+            m_rayBuf = {
+                1.0f,
+                r->body != kInvalidBody ? static_cast<float>(r->body.index) : -1.0f,
+                r->fixture != kInvalidFixture ? static_cast<float>(r->fixture.index) : -1.0f,
+                static_cast<float>(r->point.x), static_cast<float>(r->point.y),
+                static_cast<float>(r->normal.x), static_cast<float>(r->normal.y),
+                static_cast<float>(r->fraction),
+            };
+        }
+        return emscripten::val(emscripten::typed_memory_view(m_rayBuf.size(), m_rayBuf.data()));
     }
 
     // ---- motion helpers ----------------------------------------------------
@@ -904,6 +987,17 @@ private:
         if (id < 0 || static_cast<std::size_t>(id) >= m_joints.size()) { return nullptr; }
         return m_joints[static_cast<std::size_t>(id)];
     }
+    // a plain revolute joint (a weld derives from it but is not one)
+    static RevoluteJoint* revolute(Joint* j)
+    {
+        if (j == nullptr || dynamic_cast<WeldJoint*>(j) != nullptr) { return nullptr; }
+        return dynamic_cast<RevoluteJoint*>(j);
+    }
+    void wakeJoint(const Joint* j)
+    {
+        if (m_world->IsValid(j->HandleA())) { m_world->Wake(j->HandleA()); }
+        if (m_world->IsValid(j->HandleB())) { m_world->Wake(j->HandleB()); }
+    }
 
     void wakeAll(const std::vector<BodyHandle>& hs)
     {
@@ -996,6 +1090,7 @@ private:
     std::vector<Joint*>           m_joints;   // joint id -> borrowed Joint* (nullptr once gone)
     std::vector<Kin>              m_kin;      // kinematic bodies with a binding-advanced angle
     std::vector<float>            m_contactsBuf; // contacts()'s backing store
+    std::array<float, 8>          m_rayBuf{};    // castRayClosest()'s backing store
 };
 
 EMSCRIPTEN_BINDINGS(manifold)
@@ -1044,6 +1139,11 @@ EMSCRIPTEN_BINDINGS(manifold)
         .function("removeJoint",         &ManifoldSim::removeJoint)
         .function("jointCount",          &ManifoldSim::jointCount)
         .function("setJointMotor",       &ManifoldSim::setJointMotor)
+        .function("setRevoluteReference", &ManifoldSim::setRevoluteReference)
+        .function("setRevoluteLimits",   &ManifoldSim::setRevoluteLimits)
+        .function("setRevoluteSpring",   &ManifoldSim::setRevoluteSpring)
+        .function("jointAngle",          &ManifoldSim::jointAngle)
+        .function("castRayClosest",      &ManifoldSim::castRayClosest)
         .function("setBodyOptions",      &ManifoldSim::setBodyOptions)
         .function("wake",                &ManifoldSim::wake)
         .function("isAwake",             &ManifoldSim::isAwake)

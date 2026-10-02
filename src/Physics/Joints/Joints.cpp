@@ -87,10 +87,43 @@ namespace Manifold2D
         // RevoluteJoint -- PORT of Joints.lua Revolute (lines 69-99).
         // =================================================================
 
+        namespace
+        {
+            // b2UnwindAngle: into (-pi, pi]
+            Real Unwind(Real a) noexcept
+            {
+                if (a < -kPi) { return a + Real(2) * kPi * std::ceil((-kPi - a) / (Real(2) * kPi)); }
+                if (a > kPi) { return a - Real(2) * kPi * std::ceil((a - kPi) / (Real(2) * kPi)); }
+                return a;
+            }
+        } // namespace
+
+        Real RevoluteJoint::JointAngle(const PhysicsWorld& w) const noexcept
+        {
+            const Real a = w.IsValid(m_hA) ? w.GetAngle(m_hA) : Real(0);
+            const Real b = w.IsValid(m_hB) ? w.GetAngle(m_hB) : Real(0);
+            return Unwind(b - a - m_referenceAngle);
+        }
+
         void RevoluteJoint::Prepare(PhysicsWorld& w, Real dt)
         {
             m_ia = w.IsValid(m_hA) ? m_hA.index : kInvalidSlot;
             m_ib = w.IsValid(m_hB) ? m_hB.index : kInvalidSlot;
+
+            // the angular parts (b2PrepareRevoluteJoint + b2PrepareJoint)
+            m_h = dt;
+            const Real k = JointMath::InvInertia(w, m_ia) + JointMath::InvInertia(w, m_ib);
+            m_axialMass = k > Real(0) ? Real(1) / k : Real(0);
+            m_angle0 = Unwind(JointMath::Angle(w, m_ib) - JointMath::Angle(w, m_ia) - m_referenceAngle);
+            m_deltaAngle = Real(0);
+            m_substepping = false;
+            m_pass = 0;
+            const SoftCoeffs spring = MakeSoft(m_hertz, m_dampingRatio, dt);
+            m_springBiasRate = spring.biasRate; m_springMassScale = spring.massScale; m_springImpulseScale = spring.impulseScale;
+            const Real constraintHertz = dt > Real(0) ? std::min(kJointConstraintHertz, Real(0.25) / dt) : Real(0);
+            const SoftCoeffs soft = MakeSoft(constraintHertz, kJointConstraintDampingRatio, dt);
+            m_softBiasRate = soft.biasRate; m_softMassScale = soft.massScale; m_softImpulseScale = soft.impulseScale;
+            m_springImpulse = m_motorImpulse = m_lowerImpulse = m_upperImpulse = Real(0);
 
             m_rA = JointMath::Rotated(w, m_ia, m_localA.x, m_localA.y);
             m_rB = JointMath::Rotated(w, m_ib, m_localB.x, m_localB.y);
@@ -107,6 +140,84 @@ namespace Manifold2D
         }
 
         void RevoluteJoint::SolveVelocity(PhysicsWorld& w)
+        {
+            // pass #2 of a sub-step follows the position integration: take in the
+            // rotation it just integrated before solving (see the class comment)
+            bool useBias = true;
+            if (m_substepping)
+            {
+                if (m_pass == 1)
+                {
+                    m_deltaAngle += (JointMath::AngVel(w, m_ib) - JointMath::AngVel(w, m_ia)) * m_h;
+                }
+                useBias = m_pass == 0;
+                ++m_pass;
+            }
+            SolveAngular(w, useBias);
+            SolvePoint(w);
+        }
+
+        void RevoluteJoint::SolveAngular(PhysicsWorld& w, bool useBias)
+        {
+            if (!(m_enableSpring || m_enableMotor || m_enableLimit) || m_axialMass <= Real(0))
+            {
+                return; // nothing to drive, or neither body can turn (Box2D: fixedRotation)
+            }
+            const Real jointAngle = m_angle0 + m_deltaAngle;
+            const auto cdot = [&]() { return JointMath::AngVel(w, m_ib) - JointMath::AngVel(w, m_ia); };
+            const auto apply = [&](Real impulse)
+            {
+                JointMath::ApplyAngular(w, m_ia, -impulse);
+                JointMath::ApplyAngular(w, m_ib, impulse);
+            };
+
+            if (m_enableSpring)
+            {
+                const Real C = Unwind(jointAngle - m_targetAngle);
+                const Real bias = m_springBiasRate * C;
+                const Real impulse = -m_springMassScale * m_axialMass * (cdot() + bias) - m_springImpulseScale * m_springImpulse;
+                m_springImpulse += impulse;
+                apply(impulse);
+            }
+
+            if (m_enableMotor)
+            {
+                const Real maxImpulse = m_h * m_maxMotorTorque;
+                const Real impulse = -m_axialMass * (cdot() - m_motorSpeed);
+                const Real old = m_motorImpulse;
+                m_motorImpulse = std::clamp(old + impulse, -maxImpulse, maxImpulse);
+                apply(m_motorImpulse - old);
+            }
+
+            if (m_enableLimit)
+            {
+                const Real invH = m_h > Real(0) ? Real(1) / m_h : Real(0);
+                // lower: C = angle - lower >= 0
+                {
+                    const Real C = jointAngle - m_lower;
+                    Real bias = Real(0), massScale = Real(1), impulseScale = Real(0);
+                    if (C > Real(0)) { bias = C * invH; } // speculation
+                    else if (useBias) { bias = m_softBiasRate * C; massScale = m_softMassScale; impulseScale = m_softImpulseScale; }
+                    const Real old = m_lowerImpulse;
+                    const Real impulse = -massScale * m_axialMass * (cdot() + bias) - impulseScale * old;
+                    m_lowerImpulse = std::max(old + impulse, Real(0));
+                    apply(m_lowerImpulse - old);
+                }
+                // upper: C = upper - angle >= 0 (signs flipped to keep C and the impulse positive)
+                {
+                    const Real C = m_upper - jointAngle;
+                    Real bias = Real(0), massScale = Real(1), impulseScale = Real(0);
+                    if (C > Real(0)) { bias = C * invH; }
+                    else if (useBias) { bias = m_softBiasRate * C; massScale = m_softMassScale; impulseScale = m_softImpulseScale; }
+                    const Real old = m_upperImpulse;
+                    const Real impulse = -massScale * m_axialMass * (-cdot() + bias) - impulseScale * old;
+                    m_upperImpulse = std::max(old + impulse, Real(0));
+                    apply(-(m_upperImpulse - old));
+                }
+            }
+        }
+
+        void RevoluteJoint::SolvePoint(PhysicsWorld& w)
         {
             const Vec2 va = JointMath::Vat(w, m_ia, m_rA.x, m_rA.y);
             const Vec2 vb = JointMath::Vat(w, m_ib, m_rB.x, m_rB.y);
@@ -455,7 +566,17 @@ namespace Manifold2D
                 {
                     return std::make_unique<WeldJoint>(def.a, def.b, localA, localB, refAngle);
                 }
-                return std::make_unique<RevoluteJoint>(def.a, def.b, localA, localB);
+                auto j = std::make_unique<RevoluteJoint>(def.a, def.b, localA, localB);
+                j->SetReferenceAngle(def.referenceAngle);
+                j->EnableLimit(def.enableLimit);
+                j->SetLimits(def.lowerAngle, def.upperAngle);
+                j->EnableSpring(def.enableSpring);
+                j->SetSpring(def.frequencyHz, def.dampingRatio);
+                j->SetTargetAngle(def.targetAngle);
+                j->EnableMotor(def.enableMotor);
+                j->SetMotorSpeed(def.motorSpeed);
+                j->SetMaxMotorTorque(def.maxMotorTorque);
+                return j;
             }
             case JointKind::Prismatic:
             {

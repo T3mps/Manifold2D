@@ -13,6 +13,7 @@
 // PRESENTATION-FREE + C++20-clean: Geometry::Vec2 + std + sibling Physics headers only.
 // namespace Manifold2D::Physics, Core style.
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 
@@ -55,7 +56,24 @@ namespace Manifold2D
 
         // ================================================================
         // RevoluteJoint -- pin A and B at a shared anchor (a point constraint).
-        // PORT: Joints.lua Revolute (lines 69-99).
+        // PORT: Joints.lua Revolute (lines 69-99), plus Box2D v3 b2RevoluteJoint's
+        // angular parts (revolute_joint.c b2SolveRevoluteJoint), solved before
+        // the point constraint as there:
+        //   * spring: drive the joint angle to targetAngle, soft at (hertz,
+        //     dampingRatio) (b2MakeSoft);
+        //   * motor: drive the relative angular velocity to motorSpeed, the
+        //     impulse clamped to h * maxMotorTorque;
+        //   * limit: two one-sided constraints, speculative while open (bias
+        //     C / h), soft at the joint constraint softness when breached
+        //     (b2PrepareJoint: 60 Hz clamped to 0.25 / h, damping ratio 2), the
+        //     push-out only on the biased pass (useBias).
+        //
+        // The joint angle through a step: Box2D reads it from the bodies'
+        // in-flight deltaRotation; this engine's joints see velocities only, so
+        // the joint integrates the relative angular velocity itself. SoftStep runs
+        // joint pass #1 after the warm start (the biased pass) and pass #2 right
+        // after integrating positions (the relax pass): the velocities pass #2
+        // sees are the ones just integrated, so it adds (wB - wA) * h first.
         // ================================================================
         class RevoluteJoint : public Joint
         {
@@ -66,12 +84,44 @@ namespace Manifold2D
             }
             void Prepare(PhysicsWorld& w, Real dt) override;
             void SolveVelocity(PhysicsWorld& w) override;
+            void BeginSubstep() noexcept override
+            {
+                m_substepping = true;
+                m_pass = 0;
+                m_springImpulse = m_motorImpulse = m_lowerImpulse = m_upperImpulse = Real(0);
+            }
             [[nodiscard]] std::uint32_t BodyA() const noexcept override { return m_ia; }
             [[nodiscard]] std::uint32_t BodyB() const noexcept override { return m_ib; }
             [[nodiscard]] BodyHandle HandleA() const noexcept override { return m_hA; }
             [[nodiscard]] BodyHandle HandleB() const noexcept override { return m_hB; }
 
+            // ---- Box2D b2RevoluteJoint_* controls (take effect from the next Step;
+            // a sleeping body is not woken here: the caller wakes it) ----
+            // The current joint angle: angleB - angleA - referenceAngle, in (-pi, pi].
+            [[nodiscard]] Real JointAngle(const PhysicsWorld& w) const noexcept;
+            void SetReferenceAngle(Real a) noexcept { m_referenceAngle = a; }
+            void EnableLimit(bool on) noexcept { m_enableLimit = on; }
+            void SetLimits(Real lower, Real upper) noexcept { m_lower = std::min(lower, upper); m_upper = std::max(lower, upper); }
+            void EnableSpring(bool on) noexcept { m_enableSpring = on; }
+            void SetSpring(Real hertz, Real dampingRatio) noexcept { m_hertz = hertz; m_dampingRatio = dampingRatio; }
+            void SetTargetAngle(Real a) noexcept { m_targetAngle = a; }
+            void EnableMotor(bool on) noexcept { m_enableMotor = on; }
+            void SetMotorSpeed(Real speed) noexcept { m_motorSpeed = speed; }
+            void SetMaxMotorTorque(Real torque) noexcept { m_maxMotorTorque = torque > Real(0) ? torque : Real(0); }
+            [[nodiscard]] Real ReferenceAngle() const noexcept { return m_referenceAngle; }
+            [[nodiscard]] bool IsLimitEnabled() const noexcept { return m_enableLimit; }
+            [[nodiscard]] Real LowerLimit() const noexcept { return m_lower; }
+            [[nodiscard]] Real UpperLimit() const noexcept { return m_upper; }
+            [[nodiscard]] bool IsSpringEnabled() const noexcept { return m_enableSpring; }
+            [[nodiscard]] Real TargetAngle() const noexcept { return m_targetAngle; }
+            [[nodiscard]] bool IsMotorEnabled() const noexcept { return m_enableMotor; }
+            [[nodiscard]] Real MotorSpeed() const noexcept { return m_motorSpeed; }
+
         protected:
+            // the angular parts (spring, motor, limit), then the point constraint: Box2D's order
+            void SolveAngular(PhysicsWorld& w, bool useBias);
+            void SolvePoint(PhysicsWorld& w);
+
             BodyHandle    m_hA, m_hB;
             std::uint32_t m_ia = kInvalidSlot, m_ib = kInvalidSlot;
             Vec2          m_localA{ Real(0), Real(0) }; // anchor in A's local frame
@@ -80,6 +130,26 @@ namespace Manifold2D
             Vec2 m_rA{ Real(0), Real(0) }; // world arm A
             Vec2 m_rB{ Real(0), Real(0) }; // world arm B
             Real m_biasX = Real(0), m_biasY = Real(0);
+
+            // Box2D b2RevoluteJoint parameters.
+            Real m_referenceAngle = Real(0);
+            bool m_enableLimit = false;
+            Real m_lower = Real(0), m_upper = Real(0);
+            bool m_enableSpring = false;
+            Real m_hertz = Real(0), m_dampingRatio = Real(0), m_targetAngle = Real(0);
+            bool m_enableMotor = false;
+            Real m_motorSpeed = Real(0), m_maxMotorTorque = Real(0);
+            // Prepared per step / tracked per sub-step.
+            Real m_h = Real(0);              // the (sub-)step the joint is prepared for
+            Real m_axialMass = Real(0);      // 1 / (iA + iB)
+            Real m_angle0 = Real(0);         // the joint angle at the start of the step
+            Real m_deltaAngle = Real(0);     // its change, integrated through the sub-steps
+            Real m_springBiasRate = Real(0), m_springMassScale = Real(1), m_springImpulseScale = Real(0);
+            Real m_softBiasRate = Real(0), m_softMassScale = Real(1), m_softImpulseScale = Real(0);
+            Real m_springImpulse = Real(0), m_motorImpulse = Real(0);
+            Real m_lowerImpulse = Real(0), m_upperImpulse = Real(0);
+            bool m_substepping = false;      // the solver calls BeginSubstep (SoftStep)
+            int  m_pass = 0;                 // joint pass within the sub-step
         };
 
         // ================================================================

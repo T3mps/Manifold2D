@@ -30,7 +30,8 @@ check('the scene API is present', () => {
   const need = ['setMaterial', 'setFilter', 'setFixedRotation', 'addBody', 'addBodyPoly', 'addFixture', 'addFixturePoly',
     'removeBody', 'isAlive', 'setTransform', 'setVelocity', 'applyImpulse', 'setKinematic',
     'addDistanceJoint', 'addRevoluteJoint', 'addWeldJoint', 'addPrismaticJoint', 'addWheelJoint', 'addMotorJoint',
-    'addMouseJoint', 'setMouseTarget', 'removeJoint', 'jointCount'];
+    'addMouseJoint', 'setMouseTarget', 'removeJoint', 'jointCount',
+    'setRevoluteReference', 'setRevoluteLimits', 'setRevoluteSpring', 'jointAngle', 'castRayClosest'];
   const missing = need.filter((k) => typeof M.ManifoldSim.prototype[k] !== 'function');
   return missing.length === 0 || fail('missing', missing);
 });
@@ -563,6 +564,53 @@ check('setJointMotor drives a prismatic ram that stalls on a wall, then retracts
   const back = row(s, ram);
   s.delete();
   return (on && near(stall[0], 1.0, 0.04) && Math.abs(stall[3]) < 0.05 && near(back[3], -1.5, 0.05) && Math.abs(back[1]) < 0.01) || fail('ram', { on, stall: [...stall], back: [...back] });
+});
+
+check('castRayClosest: nearest hit with point, normal and fraction; the filter and exclude decide what it sees', () => {
+  const s = new M.ManifoldSim(0, 4);
+  const self = s.addBody(DYNAMIC, BOX, 0, 0, 0, 0.5, 0.3);
+  s.setFilter(2, 0xffffffff);
+  const crate = s.addBody(STATIC, BOX, 3, 0, 0, 0.5, 0.5);
+  s.setFilter(1, 0xffffffff);
+  const wall = s.addBody(STATIC, BOX, 6, 0, 0, 0.2, 2);
+  const ray = (cat, mask, ex) => Array.from(s.castRayClosest(-2, 0, 12, 0, cat, mask, ex));
+  const all = ray(1, 0xffffffff, -1), past = ray(1, 0xffffffff, self), walls = ray(1, 1, self), miss = Array.from(s.castRayClosest(-2, 5, 12, 0, 1, 0xffffffff, -1));
+  s.delete();
+  const ok = all[0] === 1 && all[1] === self && near(all[3], -0.5, 0.01) && near(all[5], -1, 0.01) && near(all[7], 1.5 / 12, 0.005)
+    && past[1] === crate && near(past[3], 2.5, 0.01) && walls[1] === wall && near(walls[3], 5.8, 0.01) && miss[0] === 0;
+  return ok || fail('rays', { all, past, walls, miss });
+});
+
+check('revolute limits: a hinged bar falling under gravity stops at its upper limit', () => {
+  const s = new M.ManifoldSim(10, 4);
+  s.setFilter(1, 0);                       // the pin touches nothing
+  const pin = s.addBody(STATIC, CIRCLE, 0, 0, 0, 0.05, 0);
+  s.setFilter(1, 0xffffffff);
+  const bar = s.addBody(DYNAMIC, BOX, 0.5, 0, 0, 0.5, 0.05);
+  const id = s.addRevoluteJoint(pin, bar, 0, 0);
+  const set = s.setRevoluteLimits(id, true, -0.5, 0.5);
+  run(s, 180);
+  const a = row(s, bar)[2], j = s.jointAngle(id);
+  s.delete();
+  return (set && near(a, 0.5, 0.03) && near(j, a, 1e-5)) || fail('limit', { set, a, j });
+});
+
+check('revolute spring and motor: the spring settles on its target (from a reference pose); the motor holds its speed', () => {
+  const s = new M.ManifoldSim(0, 4);
+  s.setFilter(1, 0);
+  const pin = s.addBody(STATIC, CIRCLE, 0, 0, 0, 0.05, 0);
+  const pin2 = s.addBody(STATIC, CIRCLE, 0, 3, 0, 0.05, 0);
+  s.setFilter(1, 0xffffffff);
+  const bar = s.addBody(DYNAMIC, BOX, 0.5, 0, 0, 0.5, 0.05);
+  const spun = s.addBody(DYNAMIC, BOX, 0.5, 3, 0, 0.5, 0.05);
+  const id = s.addRevoluteJoint(pin, bar, 0, 0), mid = s.addRevoluteJoint(pin2, spun, 0, 3);
+  s.setRevoluteReference(id, 0.2);
+  s.setRevoluteSpring(id, true, 2, 1, 0.8);   // body angle -> 0.2 + 0.8
+  const motor = s.setJointMotor(mid, 2, 100);
+  run(s, 180);
+  const a = row(s, bar)[2], j = s.jointAngle(id), w = row(s, spun)[5], weld = s.jointAngle(s.addWeldJoint(pin, bar, 0, 0));
+  s.delete();
+  return (motor && near(a, 1.0, 0.02) && near(j, 0.8, 0.02) && near(w, 2, 0.02) && Number.isNaN(weld)) || fail('spring/motor', { motor, a, j, w, weld });
 });
 
 check('determinism under a gravity well: two identical worlds stay bit-identical', () => {

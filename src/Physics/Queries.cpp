@@ -294,6 +294,146 @@ namespace Manifold2D
         }
 
         // --------------------------------------------------------------------
+        // CastRayClosest -- Box2D v3 b2World_CastRayClosest. The ray is a
+        // zero-radius circle cast with the engine's GJK conservative advancement
+        // (as RayVsBody), which stops within the cast tolerance of the surface:
+        //   * the normal is measured from a probe kRayNormalProbe back along the
+        //     ray (at the stopping point itself a zero-radius ray can sit ON a
+        //     polygon face, where GJK's distance is 0 and its normal degenerate),
+        //     then again from kRayNormalProbe off the hit along that normal;
+        //   * the hit is carried on along the ray onto the surface by the
+        //     remaining distance (exact for flat faces, within the tolerance on
+        //     curves).
+        // --------------------------------------------------------------------
+        std::optional<RayResult> PhysicsWorld::CastRayClosest(const Vec2& origin,
+                                                              const Vec2& translation,
+                                                              const QueryFilter& filter) const
+        {
+            const Real len = std::sqrt(translation.x * translation.x + translation.y * translation.y);
+            if (!(len > Real(1e-9)))
+            {
+                return std::nullopt;
+            }
+            const Vec2 dir(translation.x / len, translation.y / len);
+            static const Shape ray = MakeCircle(Real(0));
+            const Transform start{ origin, Real(0) };
+
+            const Vec2 end(origin.x + translation.x, origin.y + translation.y);
+            Aabb2 box;
+            box.min = Vec2(std::min(origin.x, end.x) - kShapeCastTol, std::min(origin.y, end.y) - kShapeCastTol);
+            box.max = Vec2(std::max(origin.x, end.x) + kShapeCastTol, std::max(origin.y, end.y) + kShapeCastTol);
+
+            constexpr Real kRayNormalProbe = Real(4) * kLinearSlop;
+            bool      have = false;
+            RayResult best{};
+            // r: the cast against one obstacle; inside: the origin is in (or on) it;
+            // dist(xf): the ray point's distance result against that obstacle
+            const auto consider = [&](const ShapeCastResult& r, bool inside, BodyHandle body, FixtureHandle fx, const auto& dist)
+            {
+                if (!r.hit || inside || (have && r.t >= best.fraction))
+                {
+                    return;
+                }
+                const Vec2 stop(origin.x + translation.x * r.t, origin.y + translation.y * r.t);
+                const Real back = std::min(kRayNormalProbe, r.t * len);
+                const ShapeDistanceResult probe = dist(Transform{ Vec2(stop.x - dir.x * back, stop.y - dir.y * back), Real(0) });
+                Vec2 normal = probe.normal;
+                const Real nl = std::sqrt(normal.x * normal.x + normal.y * normal.y);
+                if (nl > Real(1e-6)) { normal = Vec2(normal.x / nl, normal.y / nl); }
+                else { normal = Vec2(-dir.x, -dir.y); }
+                // onto the surface: the remaining gap, along the ray (it closes at
+                // |dir . normal| per unit of travel)
+                Real t = r.t;
+                const Real closing = -(dir.x * normal.x + dir.y * normal.y);
+                if (closing > Real(0.05) && r.distance > Real(0))
+                {
+                    t = std::min(Real(1), t + r.distance / (closing * len));
+                }
+                if (have && t >= best.fraction)
+                {
+                    return;
+                }
+                // the normal AT the hit: probe from just off it along that first
+                // normal (the back-along-the-ray probe sees a nearby surface point
+                // on a curve, not the hit itself)
+                {
+                    const Vec2 hp(origin.x + translation.x * t, origin.y + translation.y * t);
+                    const ShapeDistanceResult at = dist(Transform{ Vec2(hp.x + normal.x * kRayNormalProbe, hp.y + normal.y * kRayNormalProbe), Real(0) });
+                    const Real al = std::sqrt(at.normal.x * at.normal.x + at.normal.y * at.normal.y);
+                    if (al > Real(1e-6)) { normal = Vec2(at.normal.x / al, at.normal.y / al); }
+                }
+                best.fraction = t;
+                best.point    = Vec2(origin.x + translation.x * t, origin.y + translation.y * t);
+                best.normal   = normal;
+                best.body     = body;
+                best.fixture  = fx;
+                have          = true;
+            };
+            const auto admits = [&](std::uint32_t fi)
+            {
+                return (m_fxFilterCat[fi] & filter.maskBits) != 0u && (m_fxFilterMask[fi] & filter.categoryBits) != 0u;
+            };
+            const auto excluded = [&](std::uint32_t b)
+            {
+                return filter.exclude != kInvalidBody && filter.exclude.index == b && filter.exclude.generation == m_gen[b];
+            };
+            const auto castFixture = [&](std::uint32_t fi)
+            {
+                const std::uint32_t b = m_fxBody[fi];
+                const Transform xf = ComposeFixtureXf(
+                    Vec2(m_posX[b], m_posY[b]), m_angle[b],
+                    Vec2(m_fxLocalPosX[fi], m_fxLocalPosY[fi]), m_fxLocalAngle[fi]);
+                const auto dist = [&](const Transform& at) { return ShapeDistance(ray, at, m_fxShape[fi], xf); };
+                const bool inside = dist(start).distance <= kShapeCastTol;
+                consider(::Manifold2D::Physics::ShapeCast(ray, start, translation, m_fxShape[fi], xf), inside,
+                         BodyHandle{ b, m_gen[b] }, FixtureHandle{ fi, m_fxGen[fi] }, dist);
+            };
+
+            StaticCandidates(box, m_scratchSpans, m_scratchStatics, m_staticGridScratch);
+            for (const Aabb2& span : m_scratchSpans) // tile terrain: no fixture, no filter
+            {
+                Vec2 poly[4];
+                AabbToCorners(span, poly);
+                const auto dist = [&](const Transform& at) { return ShapePolyDistance(ray, at, poly, 4); };
+                const bool inside = dist(start).distance <= kShapeCastTol;
+                consider(ShapeCastPoly(ray, start, translation, poly, 4), inside, kInvalidBody, kInvalidFixture, dist);
+            }
+            for (const std::uint32_t idx : m_scratchStatics)
+            {
+                if (m_sensor[idx] != 0 || excluded(idx))
+                {
+                    continue;
+                }
+                if (idx < m_bodyFixtures.size() && !m_bodyFixtures[idx].empty())
+                {
+                    for (const std::uint32_t fi : m_bodyFixtures[idx])
+                    {
+                        if (fi >= m_fxCount || m_fxGen[fi] == 0u || m_fxSensor[fi] != 0u || !admits(fi)) { continue; }
+                        castFixture(fi);
+                    }
+                }
+                else // a fixtureless legacy static: its single shape, unfiltered
+                {
+                    const Transform xf{ Vec2(m_posX[idx], m_posY[idx]), m_angle[idx] };
+                    const auto dist = [&](const Transform& at) { return ShapeDistance(ray, at, m_shape[idx], xf); };
+                    const bool inside = dist(start).distance <= kShapeCastTol;
+                    consider(::Manifold2D::Physics::ShapeCast(ray, start, translation, m_shape[idx], xf), inside,
+                             BodyHandle{ idx, m_gen[idx] }, kInvalidFixture, dist);
+                }
+            }
+            m_rayMoverScratch.clear();
+            m_fixtureBroadphase->QueryAABB(box, m_rayMoverScratch);
+            for (const std::uint32_t fi : m_rayMoverScratch)
+            {
+                if (fi >= m_fxCount || m_fxGen[fi] == 0u || m_fxSensor[fi] != 0u || !admits(fi)) { continue; }
+                const std::uint32_t b = m_fxBody[fi];
+                if (m_alive[b] == 0 || m_sensor[b] != 0 || excluded(b)) { continue; }
+                castFixture(fi);
+            }
+            return have ? std::optional<RayResult>(best) : std::nullopt;
+        }
+
+        // --------------------------------------------------------------------
         // LineOfSight -- PORT of lineOfSight (601-604). Only TALL (sight-
         // blocking) cells block; LOW obstacles are see-through.
         // --------------------------------------------------------------------
