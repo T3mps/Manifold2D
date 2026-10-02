@@ -712,10 +712,21 @@ namespace Manifold2D
                 return m;
             }
 
-            if (g.distance > totalR)
+            // Speculative gap (surface distance in (0, margin]): Box2D v3's
+            // b2CollidePolygons does NOT special-case it -- it finds the reference
+            // face and clips the incident edge whether or not the shapes overlap,
+            // keeping each clipped point whose separation is within the speculative
+            // distance, so a face closing on a face gets both of its points before
+            // they touch. Only a vertex-vertex approach keeps a single point. The
+            // single closest-point (GJK witness) below is that vertex-vertex point,
+            // and the fallback when nothing survives the clip. (A lone witness point
+            // under a flat face is arbitrary, so every impulse it carried torqued the
+            // body: a box dropped flat landed spinning ~12 rad/s.)
+            const bool speculative = g.distance > totalR;
+            Manifold spec{};
+            if (speculative)
             {
-                // Speculative gap: surface distance in (0, margin].
-                // Emit one speculative contact point.
+                Manifold& m = spec;
                 const Real dist = g.distance;
                 Vec2 normal{ Real(-1), Real(0) };
                 if (dist > Real(1e-6f))
@@ -736,7 +747,6 @@ namespace Manifold2D
                 m.points[0] = ManifoldPoint{ cp, totalR - dist, normal, id };
                 m.pointCount = 1;
                 m.kind = NarrowphaseKind::SatPolygon; // poly-poly speculative gap
-                return m;
             }
 
             // ----------------------------------------------------------------
@@ -860,6 +870,25 @@ namespace Manifold2D
             const Vec2& incV0 = vsInc[incEdge];
             const Vec2& incV1 = vsInc[(incEdge + 1) % nInc];
 
+            if (speculative)
+            {
+                // Box2D: if the closest features of the reference and incident edges
+                // are both vertices (a corner closing on a corner), one point.
+                const Vec2 d1(refV1.x - refV0.x, refV1.y - refV0.y), d2(incV1.x - incV0.x, incV1.y - incV0.y);
+                const Vec2 r(refV0.x - incV0.x, refV0.y - incV0.y);
+                const Real a11 = d1.x * d1.x + d1.y * d1.y, a22 = d2.x * d2.x + d2.y * d2.y;
+                const Real a12 = d1.x * d2.x + d1.y * d2.y, b1 = d1.x * r.x + d1.y * r.y, b2 = d2.x * r.x + d2.y * r.y;
+                const Real den = a11 * a22 - a12 * a12;
+                Real f1 = (den > Real(1e-12f) && a11 > Real(0)) ? std::clamp((a12 * b2 - a22 * b1) / den, Real(0), Real(1)) : Real(0);
+                Real f2 = a22 > Real(0) ? std::clamp((a12 * f1 + b2) / a22, Real(0), Real(1)) : Real(0);
+                f1 = a11 > Real(0) ? std::clamp((a12 * f2 - b1) / a11, Real(0), Real(1)) : Real(0);
+                const auto atEnd = [](Real f) { return f <= Real(0) || f >= Real(1); };
+                if (atEnd(f1) && atEnd(f2))
+                {
+                    return spec;
+                }
+            }
+
             // ----------------------------------------------------------------
             // Clip the incident segment against the two side planes of the
             // reference face (Box2D v3 b2ClipSegments).
@@ -889,7 +918,7 @@ namespace Manifold2D
             int nc1 = ClipSegment(incV0, incV1, negTangentN, offset1,
                                    clipBuf1, clipT1);
 
-            if (nc1 == 0) return m; // degenerate: nothing survives clip 1
+            if (nc1 == 0) return speculative ? spec : m; // degenerate: nothing survives clip 1
 
             // Side clip 2: keep points where dot(p, tangentN) <= dot(refV1, tangentN)
             const Real offset2 = refV1.x * tangentN.x + refV1.y * tangentN.y;
@@ -923,7 +952,7 @@ namespace Manifold2D
                 }
             }
 
-            if (nc2 == 0) return m;
+            if (nc2 == 0) return speculative ? spec : m;
 
             // ----------------------------------------------------------------
             // Keep only the clipped points that are on the "inside" of the
@@ -952,7 +981,9 @@ namespace Manifold2D
                 // Only keep penetrating points (depth > 0).
                 // A point exactly on the face (depth==0) is a degenerate touch;
                 // we discard it for stability (the speculative path handles gaps).
-                if (depth <= Real(0)) continue;
+                // overlapping: the penetrating points; speculative: every point whose
+                // surface gap is within the margin (separation = -gap, Box2D's rule)
+                if (speculative ? (depth + totalR <= -speculativeMargin) : (depth <= Real(0))) continue;
 
                 // Stable feature id: pack (refIsA, refEdge, incEdge + sub-index).
                 // For the two clipped points we use incEdge itself and incEdge+1
@@ -973,12 +1004,13 @@ namespace Manifold2D
 
                 ManifoldPoint mp{};
                 mp.point      = cp;
-                mp.separation = depth;
+                mp.separation = speculative ? depth + totalR : depth;
                 mp.normal     = contactNormal;
                 mp.id         = id;
                 m.points[m.pointCount++] = mp;
             }
 
+            if (speculative && m.pointCount == 0) { return spec; }
             return m;
             } // CollidePoly
 

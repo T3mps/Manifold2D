@@ -94,13 +94,39 @@ TEST_CASE("Continuous: a fast box ends its impact step at a static wall's surfac
     }
 }
 
-TEST_CASE("Continuous: switched off, the impact step overshoots as before",
+// A long bar spinning fast beside a wall, barely moving: its tip sweeps 0.5 m a step
+// through where the wall is. The speculative margin scales with LINEAR speed, so only
+// the swept (rotating) step catches the tip.
+static Real SpinTipReach(bool continuous)
+{
+    PhysicsWorld w{ ZeroG(continuous) };
+    BodyDef wall;
+    wall.type = BodyType::Static;
+    wall.shape = Box(Real(0.07), Real(2.5));
+    w.AddBody(wall);
+    BodyDef b;
+    b.type = BodyType::Dynamic;
+    b.position = Vec2(Real(-0.45), Real(0));
+    b.shape = Box(Real(0.5), Real(0.02));
+    const BodyHandle p = w.AddBody(b);
+    w.SetAngle(p, Real(1.5707963));
+    w.SetAngularVelocity(p, Real(30));
+    Real reach = Real(-9);
+    for (int i = 0; i < 20; ++i)
+    {
+        w.Step(kStep);
+        reach = std::max(reach, w.Position(p).x + Real(0.5) * std::abs(std::cos(w.GetAngle(p))));
+    }
+    return reach; // the farthest the bar's tip got in x
+}
+
+TEST_CASE("Continuous: a bar spinning fast beside a static wall is stopped by it; switched off, its tip goes in",
           "[physics][ccd][continuous]")
 {
-    PhysicsWorld w{ ZeroG(false) };
-    const Shot s = Fire(w, Box(Real(0.15), Real(0.15)), Real(0.15), Real(15));
-    INFO("max overlap " << s.maxOverlap);
-    CHECK(s.maxOverlap > Real(0.05));
+    const Real on = SpinTipReach(true), off = SpinTipReach(false);
+    INFO("tip reach on " << on << " off " << off);
+    CHECK(on < Real(-0.05));  // at the wall's face (-0.07)
+    CHECK(off > Real(-0.045)); // into the wall (measured ~4 cm past its face)
 }
 
 TEST_CASE("Continuous: a fast spinning thin bar does not tunnel a static wall",
@@ -197,4 +223,5 @@ TEST_CASE("Continuous: a continuous scene is deterministic (run twice -> identic
     };
     CHECK(run() == run());
 }
+
 
