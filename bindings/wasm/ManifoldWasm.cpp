@@ -308,6 +308,10 @@ public:
         m_next.category = category;
         m_next.mask     = mask;
     }
+    // The collision group for the next bodies and fixtures (b2Filter.groupIndex):
+    // a shared negative group never collides (a ragdoll's parts), a shared
+    // positive one always does, 0 leaves it to the category/mask rule.
+    void setFilterGroup(int group) { m_next.group = group; }
     void setFixedRotation(bool on) { m_next.fixedRotation = on; }
 
     // More options for the next bodies: sleepThreshold (m/s; < 0 inherits the
@@ -611,16 +615,19 @@ public:
     // The nearest fixture the ray (ox, oy) -> (ox + tx, oy + ty) hits
     // (b2World_CastRayClosest): a fixture is seen when its category is in `mask`
     // and its mask holds `category` (b2QueryFilter); excludeSlot (-1 = none)
+    // skips one body and a negative `group` every fixture of that group (a
+    // ragdoll's own parts);
     // skips one body; sensors and fixtures containing the origin are skipped.
     // Returns [hit, body, fixture, px, py, nx, ny, fraction] -- hit 0 for a miss;
     // body -1 for a tile span; the normal faces back along the ray. A
     // typed_memory_view: copy before the next call.
     emscripten::val castRayClosest(float ox, float oy, float tx, float ty,
-                                   std::uint32_t category, std::uint32_t mask, int excludeSlot)
+                                   std::uint32_t category, std::uint32_t mask, int excludeSlot, int group)
     {
         QueryFilter f;
         f.categoryBits = category;
         f.maskBits = mask;
+        f.groupIndex = group;
         BodyHandle ex;
         if (excludeSlot >= 0 && handle(excludeSlot, ex)) { f.exclude = ex; }
         const std::optional<RayResult> r = m_world->CastRayClosest(
@@ -841,6 +848,7 @@ private:
         Real          restitution   = kDynRestitution;
         Real          linearDamping = Real(0);
         std::uint32_t category      = 1u;
+        std::int32_t  group         = 0;
         std::uint32_t mask          = 0xFFFFFFFFu;
         bool          fixedRotation = false;
         Real          sleepThreshold = Real(-1);  // < 0 inherits the world default
@@ -947,6 +955,7 @@ private:
         bd.linearDamping  = m_next.linearDamping;
         bd.fixedRotation  = m_next.fixedRotation;
         bd.categoryBits   = m_next.category;
+        bd.groupIndex     = m_next.group;
         bd.maskBits       = m_next.mask;
         bd.sleepThreshold = m_next.sleepThreshold;
         bd.bullet         = m_next.bullet;
@@ -966,6 +975,7 @@ private:
         fd.friction     = m_next.friction;
         fd.restitution  = m_next.restitution;
         fd.categoryBits = m_next.category;
+        fd.groupIndex   = m_next.group;
         fd.maskBits     = m_next.mask;
         return static_cast<int>(m_world->AddFixture(h, fd).index);
     }
@@ -1144,6 +1154,7 @@ EMSCRIPTEN_BINDINGS(manifold)
         .function("setRevoluteSpring",   &ManifoldSim::setRevoluteSpring)
         .function("jointAngle",          &ManifoldSim::jointAngle)
         .function("castRayClosest",      &ManifoldSim::castRayClosest)
+        .function("setFilterGroup",      &ManifoldSim::setFilterGroup)
         .function("setBodyOptions",      &ManifoldSim::setBodyOptions)
         .function("wake",                &ManifoldSim::wake)
         .function("isAwake",             &ManifoldSim::isAwake)

@@ -365,8 +365,7 @@ namespace Manifold2D
             // contacts wake islands). Without this, a never-sleeping body of a
             // non-colliding category standing beside a resting stack re-woke it
             // every step.
-            if (((w.m_fxFilterCat[fa] & w.m_fxFilterMask[fb]) == 0u) ||
-                ((w.m_fxFilterCat[fb] & w.m_fxFilterMask[fa]) == 0u))
+            if (!w.FixturesCollide(fa, fb))
             {
                 return;
             }
@@ -429,10 +428,10 @@ namespace Manifold2D
             {
                 return;
             }
-            // Collision filter (Box2D rule): collide iff each side's category is in the
-            // other's mask. A filtered-out pair never enters the pool -> no solve, no event.
-            if (((w.m_fxFilterCat[fa] & w.m_fxFilterMask[fb]) == 0u) ||
-                ((w.m_fxFilterCat[fb] & w.m_fxFilterMask[fa]) == 0u))
+            // Collision filter (Box2D b2ShouldShapesCollide: the group, then each
+            // side's category in the other's mask). A filtered-out pair never enters
+            // the pool -> no solve, no event.
+            if (!w.FixturesCollide(fa, fb))
             {
                 return;
             }

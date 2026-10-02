@@ -162,6 +162,7 @@ namespace Manifold2D
             // Existing dynamics tests therefore stay byte-for-byte green.
             std::uint32_t categoryBits = 1u;           // collision category
             std::uint32_t maskBits     = 0xFFFFFFFFu;  // collision mask
+            std::int32_t  groupIndex   = 0;            // collision group (see FixtureDef)
             Vec2          localPos     { Real(0), Real(0) }; // body-frame offset
             Real          localAngle   = Real(0);            // body-frame rotation
 
@@ -357,6 +358,10 @@ namespace Manifold2D
             std::uint32_t categoryBits = 1u;           // B2_DEFAULT_CATEGORY_BITS
             std::uint32_t maskBits     = 0xFFFFFFFFu;  // B2_DEFAULT_MASK_BITS
             BodyHandle    exclude      = kInvalidBody;
+            // Manifold2D extension: a NEGATIVE group skips every fixture of that
+            // group -- a ragdoll's own parts, all of them (exclude is one body).
+            // Box2D's b2QueryFilter has no group; its users filter in the callback.
+            std::int32_t  groupIndex   = 0;
         };
 
         // ----------------------------------------------------------------
@@ -1354,6 +1359,18 @@ namespace Manifold2D
             std::vector<Real>           m_fxRestitution;
             std::vector<std::uint32_t>  m_fxFilterCat;
             std::vector<std::uint32_t>  m_fxFilterMask;
+            std::vector<std::int32_t>   m_fxFilterGroup;
+        public:
+            // Box2D b2ShouldShapesCollide over two live fixtures: a shared negative
+            // group never collides, a shared positive group always does, otherwise
+            // each side's category must be in the other's mask.
+            [[nodiscard]] bool FixturesCollide(std::uint32_t fa, std::uint32_t fb) const noexcept
+            {
+                const std::int32_t ga = m_fxFilterGroup[fa];
+                if (ga != 0 && ga == m_fxFilterGroup[fb]) { return ga > 0; }
+                return (m_fxFilterCat[fa] & m_fxFilterMask[fb]) != 0u && (m_fxFilterCat[fb] & m_fxFilterMask[fa]) != 0u;
+            }
+        private:
             std::vector<std::uint8_t>   m_fxSensor;
             std::vector<std::uint32_t>  m_fxBody;    // owning body slot
             std::vector<std::uint32_t>  m_fxGen;     // generation per fixture slot

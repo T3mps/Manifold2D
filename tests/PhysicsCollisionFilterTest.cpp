@@ -184,3 +184,27 @@ TEST_CASE("Collision filter: a non-colliding mover beside a sleeping body does n
     CHECK(run(1u) == 0);      // its mask leaves out crates: filtered, so it never wakes one
     CHECK(run(1u | 2u) > 0);  // both masks agree: it wakes the crate (it is awake and beside it)
 }
+
+// Box2D b2Filter.groupIndex: a shared negative group never collides (whatever the
+// masks say), a shared positive group always collides (whatever the masks say),
+// different groups fall through to category/mask.
+TEST_CASE("Collision filter: groupIndex overrides category/mask within one group",
+          "[physics][filter][group]")
+{
+    const auto settle = [](std::int32_t ga, std::int32_t gb, std::uint32_t maskB)
+    {
+        PhysicsWorld w{ WorldDef{} };
+        BodyDef g; g.type = BodyType::Static; g.position = Vec2(Real(0), Real(0.5)); g.shape = MakeAabb(Real(5), Real(0.5));
+        w.AddBody(g);
+        const Shape box = MakePolygon(std::vector<Vec2>{ Vec2(-0.2f, -0.2f), Vec2(0.2f, -0.2f), Vec2(0.2f, 0.2f), Vec2(-0.2f, 0.2f) });
+        BodyDef a; a.type = BodyType::Dynamic; a.position = Vec2(Real(0), Real(-0.2)); a.shape = box; a.groupIndex = ga;
+        BodyDef b; b.type = BodyType::Dynamic; b.position = Vec2(Real(0), Real(-1.0)); b.shape = box; b.groupIndex = gb; b.maskBits = maskB;
+        w.AddBody(a);
+        const BodyHandle top = w.AddBody(b);
+        for (int i = 0; i < 120; ++i) { w.Step(Real(1) / Real(60)); }
+        return w.Position(top).y; // -0.6 resting on a; -0.2 when it passed through to the ground
+    };
+    CHECK(std::abs(settle(-1, -1, 0xFFFFFFFFu) + Real(0.2)) < Real(0.03)); // same negative group: through
+    CHECK(std::abs(settle(2, 2, 1u << 9) + Real(0.6)) < Real(0.03));      // same positive group: stacks despite the mask
+    CHECK(std::abs(settle(-1, -2, 0xFFFFFFFFu) + Real(0.6)) < Real(0.03)); // different groups: masks decide (collide)
+}

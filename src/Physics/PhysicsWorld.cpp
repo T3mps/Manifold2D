@@ -272,6 +272,7 @@ namespace Manifold2D
             m_fxRestitution.resize(next, Real(0));
             m_fxFilterCat.resize(next, 1u);
             m_fxFilterMask.resize(next, 0xFFFFFFFFu);
+            m_fxFilterGroup.resize(next, 0);
             m_fxSensor.resize(next, std::uint8_t(0));
             m_fxBody.resize(next, 0u);
             m_fxGen.resize(next, 0u); // 0 = dead; live starts at 1
@@ -512,6 +513,7 @@ namespace Manifold2D
             m_fxRestitution[fi]= def.restitution;
             m_fxFilterCat[fi]  = def.categoryBits;
             m_fxFilterMask[fi] = def.maskBits;
+            m_fxFilterGroup[fi] = def.groupIndex;
             m_fxSensor[fi]     = def.isSensor ? std::uint8_t(1) : std::uint8_t(0);
             m_fxBody[fi]       = bodySlot;
             m_fxGen[fi]       += 1u; // bump generation (dead=0, live starts at 1)
@@ -1163,6 +1165,7 @@ namespace Manifold2D
                 autoFd.restitution  = def.restitution;
                 autoFd.categoryBits = def.categoryBits;
                 autoFd.maskBits     = def.maskBits;
+                autoFd.groupIndex   = def.groupIndex;
                 autoFd.isSensor     = def.isSensor;
                 const std::uint32_t autoFi = AllocFixtureSlot(idx, autoFd); // no RecomputeBodyMass
 
@@ -2494,11 +2497,7 @@ namespace Manifold2D
             swept.min = Vec2(std::min(boxA.min.x, boxB.min.x) - kShapeCastTol - spinPad, std::min(boxA.min.y, boxB.min.y) - kShapeCastTol - spinPad);
             swept.max = Vec2(std::max(boxA.max.x, boxB.max.x) + kShapeCastTol + spinPad, std::max(boxA.max.y, boxB.max.y) + kShapeCastTol + spinPad);
 
-            const std::uint32_t catA = m_fxFilterCat[fi], maskA = m_fxFilterMask[fi];
-            const auto admits = [&](std::uint32_t fj)
-            {
-                return (catA & m_fxFilterMask[fj]) != 0u && (m_fxFilterCat[fj] & maskA) != 0u;
-            };
+            const auto admits = [&](std::uint32_t fj) { return FixturesCollide(fi, fj); };
             const auto testFixture = [&](std::uint32_t fj)
             {
                 const std::uint32_t bj = m_fxBody[fj];

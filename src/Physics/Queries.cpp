@@ -371,6 +371,7 @@ namespace Manifold2D
             };
             const auto admits = [&](std::uint32_t fi)
             {
+                if (filter.groupIndex < 0 && m_fxFilterGroup[fi] == filter.groupIndex) { return false; }
                 return (m_fxFilterCat[fi] & filter.maskBits) != 0u && (m_fxFilterMask[fi] & filter.categoryBits) != 0u;
             };
             const auto excluded = [&](std::uint32_t b)

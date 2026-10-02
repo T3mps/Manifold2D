@@ -81,6 +81,11 @@ namespace Manifold2D
             // Default: every fixture is in category 1 and collides with everything.
             std::uint32_t categoryBits = 1u;
             std::uint32_t maskBits     = 0xFFFFFFFFu;
+            // Collision group (Box2D b2Filter.groupIndex): fixtures sharing a
+            // NEGATIVE group never collide, sharing a POSITIVE group always
+            // collide; group 0 (or different groups) falls through to the
+            // category/mask rule. A ragdoll's parts share one negative group.
+            std::int32_t  groupIndex   = 0;
 
             // Sensor fixtures detect overlap events but do NOT generate
             // contact constraints (no collision response). Mirrors Box2D.
