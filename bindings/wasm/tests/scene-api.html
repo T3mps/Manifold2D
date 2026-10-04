@@ -32,7 +32,7 @@ check('the scene API is present', () => {
     'addDistanceJoint', 'addRevoluteJoint', 'addWeldJoint', 'addPrismaticJoint', 'addWheelJoint', 'addMotorJoint',
     'addMouseJoint', 'setMouseTarget', 'removeJoint', 'jointCount',
     'setRevoluteReference', 'setRevoluteLimits', 'setRevoluteSpring', 'jointAngle', 'jointReaction', 'castRayClosest', 'setFilterGroup',
-    'setPrismaticLimits', 'jointTranslation'];
+    'setPrismaticLimits', 'jointTranslation', 'addDistanceJointAt', 'setDistanceLimits', 'setDistanceSpring', 'jointLength'];
   const missing = need.filter((k) => typeof M.ManifoldSim.prototype[k] !== 'function');
   return missing.length === 0 || fail('missing', missing);
 });
@@ -676,6 +676,78 @@ check('prismatic limits: a lift car rests on its lower stop carrying m g; a gate
   const ok = set && near(cy, 0.5, 0.005) && near(ct, cy, 1e-5) && near(gx, 2, 0.005) && near(gt, gx, 1e-5)
     && near(fy, -mg, 0.02 * mg) && near(fx, 0, 0.01 * mg) && bad.every((b) => b === false) && nan.every(Number.isNaN);
   return ok || fail('prismatic limits', { set, cy, ct, gx, gt, mg, fx, fy, bad, nan });
+});
+
+check('distance anchors: a box hung by a corner turns its centre under it; a two-rope bridle brings a spun box to rest level', () => {
+  const s = new M.ManifoldSim(10, 4);
+  s.setFilter(1, 0);                       // only the joints act
+  s.setBodyOptions(0, false, 1);           // sleepThreshold 0: solved every step
+  s.setMaterial(1, 0.4, 0, 0.5);           // linear damping 0.5: the swings die out
+  const pivot = s.addBody(STATIC, CIRCLE, 0, 0, 0, 0.05, 0);
+  const plate = [-0.5, -0.25, 0.5, -0.25, 0.5, 0.25, -0.5, 0.25];        // 1 x 0.5 m, a polygon: these turn
+  const box = s.addBodyPoly(DYNAMIC, 0, 2, 0, plate);
+  const hook = s.addBody(STATIC, CIRCLE, 5, 0, 0, 0.05, 0);
+  const slung = s.addBodyPoly(DYNAMIC, 5, 2, 0, plate);
+  const L = Math.hypot(0.5, 1.75);
+  const corner = s.addDistanceJointAt(pivot, box, 0, 0, 0.5, 1.75, 0);     // the box's top-right corner; rigid
+  const legs = [s.addDistanceJointAt(hook, slung, 5, 0, 4.5, 1.75, 0), s.addDistanceJointAt(hook, slung, 5, 0, 5.5, 1.75, 0)];
+  const rope = legs.every((id) => s.setDistanceSpring(id, true, 0, 0) && s.setDistanceLimits(id, true, 0, L));
+  const len0 = s.jointLength(corner);
+  s.setVelocity(slung, 0, 0, 3);
+  run(s, 900);
+  const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+  const [bx, , ba] = row(s, box), [sx, , sa, , , sw] = row(s, slung);
+  const legLen = legs.map((id) => s.jointLength(id));
+  const mg = s.mass(slung) * 10, fy = legs.reduce((t, id) => t + s.jointReaction(id)[1], 0);
+  s.delete();
+  const ok = corner >= 0 && rope && near(len0, L, 1e-5)
+    && near(bx, 0, 0.01) && near(wrap(ba), Math.atan(-2), 0.02)           // centre under the corner: R(a)(-0.5, 0.25) points down
+    && near(wrap(sa), 0, 0.005) && near(sx, 5, 0.005) && near(sw, 0, 0.005) // level, under the hook, the spin gone
+    && legLen.every((l) => near(l, L, 0.005)) && near(fy, -mg, 0.02 * mg);
+  return ok || fail('anchors/bridle', { corner, rope, len0, bx, ba: wrap(ba), sx, sa: wrap(sa), sw, legLen, fy, mg });
+});
+
+check('distance rope and spring: slack when the ends close in, caught at its length when pulled; a spring hangs at g / omega^2; bad ids', () => {
+  const s = new M.ManifoldSim(0, 4);
+  s.setFilter(1, 0);
+  s.setBodyOptions(0, false, 1);
+  const pin = s.addBody(STATIC, CIRCLE, 0, 0, 0, 0.05, 0);
+  const ball = s.addBody(DYNAMIC, CIRCLE, 1, 0, 0, 0.1, 0);
+  const pin2 = s.addBody(STATIC, CIRCLE, 0, 3, 0, 0.05, 0);
+  const ball2 = s.addBody(DYNAMIC, CIRCLE, 1, 3, 0, 0.1, 0);
+  const rope = s.addDistanceJointAt(pin, ball, 0, 0, 1, 0, 0);
+  s.setDistanceSpring(rope, true, 0, 0);
+  s.setDistanceLimits(rope, true, 0, 1);
+  const rod = s.addDistanceJoint(pin2, ball2, 0);   // the original: a rigid rod
+  s.setVelocity(ball, -2, 0, 0);
+  s.setVelocity(ball2, -2, 0, 0);
+  run(s, 15);                                        // 0.25 s
+  const [slackX, , , slackV] = row(s, ball), slackLen = s.jointLength(rope), slackF = Array.from(s.jointReaction(rope));
+  const [rodX, , , rodV] = row(s, ball2);
+  s.setVelocity(ball, 3, 0, 0);                      // now away: the rope catches it
+  run(s, 60);
+  const caught = s.jointLength(rope), caughtV = row(s, ball)[3];
+  const bad = [s.setDistanceLimits(s.addRevoluteJoint(pin, ball, 0, 0), true, 0, 1), s.setDistanceSpring(999, true, 1, 1), s.setDistanceLimits(-1, true, 0, 1)];
+  const nan = [s.jointLength(s.addWeldJoint(pin2, ball2, 0, 3)), s.jointLength(999)];
+  s.delete();
+
+  const g = new M.ManifoldSim(10, 4);              // a 1 Hz spring, rest 1 m: hangs at 1 + g / (2 pi)^2
+  g.setFilter(1, 0);
+  g.setBodyOptions(0, false, 1);
+  const top = g.addBody(STATIC, CIRCLE, 0, 0, 0, 0.05, 0);
+  const bob = g.addBody(DYNAMIC, CIRCLE, 0, 1, 0, 0.1, 0);
+  const spring = g.addDistanceJointAt(top, bob, 0, 0, 0, 1, 1);
+  const on = g.setDistanceSpring(spring, true, 1, 1);
+  run(g, 300);
+  const hang = g.jointLength(spring), want = 1 + 10 / (4 * Math.PI * Math.PI);
+  g.delete();
+
+  const ok = near(slackX, 0.5, 1e-4) && near(slackV, -2, 1e-5) && near(slackLen, 0.5, 1e-4) && slackF.every((f) => Math.abs(f) < 1e-6)
+    && near(rodX, 1, 0.01) && Math.abs(rodV) < 0.05
+    && near(caught, 1, 0.003) && near(caughtV, 0, 1e-3)
+    && on && near(hang, want, 0.003)
+    && bad.every((b) => b === false) && nan.every(Number.isNaN);
+  return ok || fail('rope/spring', { slackX, slackV, slackLen, slackF, rodX, rodV, caught, caughtV, on, hang, want, bad, nan });
 });
 
 check('determinism under a gravity well: two identical worlds stay bit-identical', () => {

@@ -26,32 +26,128 @@ namespace Manifold2D
     {
         class PhysicsWorld;
 
+        // Box2D's B2_HUGE (100000 length units): an unbounded maxLength.
+        inline constexpr Real kDistanceJointHuge = Real(100000);
+
         // ================================================================
-        // DistanceJoint -- hold a fixed separation between A and B.
-        // PORT: Joints.lua Distance (lines 44-67).
+        // DistanceJoint -- hold the distance between an anchor on A and an
+        // anchor on B.
+        // PORT: Joints.lua Distance (lines 44-67), plus Box2D v3
+        // b2DistanceJoint (distance_joint.c b2SolveDistanceJoint):
+        //   * anchors: localAnchorA / localAnchorB in each body's frame
+        //     (relative to the body origin, as Box2D's localAnchor), so the
+        //     constraint acts between the anchor points and torques both bodies;
+        //   * rigid (the default): the length is a hard constraint, soft at the
+        //     joint constraint softness (60 Hz clamped to 0.25 / h, damping
+        //     ratio 2) on the biased pass, rigid on the relax pass, warm started;
+        //   * spring (enableSpring): the length becomes a spring of (hertz,
+        //     dampingRatio) about `length`; hertz 0 is NO length constraint;
+        //   * limit (enableLimit, with the spring on): minLength <= length <=
+        //     maxLength as two one-sided constraints, speculative while open
+        //     (bias C / h), soft at the joint softness when breached and only on
+        //     the biased pass, clamped >= 0, warm started. With the spring OFF,
+        //     or minLength == maxLength, the joint is rigid and the limit is not
+        //     solved (Box2D's rule);
+        //   * rope: enableSpring with hertz 0 + enableLimit [0, maxLength] --
+        //     holds only when taut, never pushes.
+        // Box2D clamps length, minLength and maxLength to [kLinearSlop,
+        // kDistanceJointHuge]; so does this joint (a rope's minLength 0 becomes
+        // 5 mm). No motor.
+        //
+        // LEGACY PATH: a joint with both anchors at the body origins and neither
+        // the spring nor the limit enabled -- what the original JointDef built --
+        // runs the Lua port unchanged (a rigid centre-to-centre rod with a
+        // Baumgarte bias computed once per step), bit for bit, so existing scenes
+        // and the determinism goldens do not move. Everything else runs Box2D's
+        // formulation, which measures the arms from each body's centre of mass.
+        //
+        // In-flight state through a step: as the revolute joint, this joint
+        // integrates the bodies' motion through the sub-steps itself (pass #2 of
+        // each sub-step follows the position integration).
         // ================================================================
         class DistanceJoint final : public Joint
         {
         public:
-            DistanceJoint(BodyHandle a, BodyHandle b, Real length)
-                : m_hA(a), m_hB(b), m_length(length)
+            DistanceJoint(BodyHandle a, BodyHandle b, Real length,
+                          Vec2 localAnchorA = Vec2(Real(0), Real(0)),
+                          Vec2 localAnchorB = Vec2(Real(0), Real(0)))
+                : m_hA(a), m_hB(b), m_length(length), m_localA(localAnchorA), m_localB(localAnchorB)
             {
             }
             void Prepare(PhysicsWorld& w, Real dt) override;
             void SolveVelocity(PhysicsWorld& w) override;
+            // The accumulated impulses are kept across sub-steps (warm start).
+            void BeginSubstep() noexcept override
+            {
+                m_substepping = true;
+                m_pass = 0;
+            }
             [[nodiscard]] std::uint32_t BodyA() const noexcept override { return m_ia; }
             [[nodiscard]] std::uint32_t BodyB() const noexcept override { return m_ib; }
             [[nodiscard]] BodyHandle HandleA() const noexcept override { return m_hA; }
             [[nodiscard]] BodyHandle HandleB() const noexcept override { return m_hB; }
 
+            // ---- Box2D b2DistanceJoint_* controls (take effect from the next
+            // Step; a sleeping body is not woken here: the caller wakes it) ----
+            // The rest length (rigid length, or the spring's rest length);
+            // clamped to [kLinearSlop, kDistanceJointHuge]; clears the impulses.
+            void SetLength(Real length) noexcept;
+            [[nodiscard]] Real GetLength() const noexcept { return m_length; }
+            void EnableSpring(bool on) noexcept { m_enableSpring = on; }
+            void SetSpring(Real hertz, Real dampingRatio) noexcept { m_hertz = hertz; m_dampingRatio = dampingRatio; }
+            [[nodiscard]] bool IsSpringEnabled() const noexcept { return m_enableSpring; }
+            [[nodiscard]] Real GetSpringHertz() const noexcept { return m_hertz; }
+            [[nodiscard]] Real GetSpringDampingRatio() const noexcept { return m_dampingRatio; }
+            void EnableLimit(bool on) noexcept { m_enableLimit = on; }
+            // Both clamped to [kLinearSlop, kDistanceJointHuge] and sorted; clears
+            // the impulses (b2DistanceJoint_SetLengthRange).
+            void SetLengthRange(Real minLength, Real maxLength) noexcept;
+            [[nodiscard]] bool IsLimitEnabled() const noexcept { return m_enableLimit; }
+            [[nodiscard]] Real GetMinLength() const noexcept { return m_minLength; }
+            [[nodiscard]] Real GetMaxLength() const noexcept { return m_maxLength; }
+            [[nodiscard]] Vec2 LocalAnchorA() const noexcept { return m_localA; }
+            [[nodiscard]] Vec2 LocalAnchorB() const noexcept { return m_localB; }
+            // The current anchor-to-anchor distance (b2DistanceJoint_GetCurrentLength).
+            [[nodiscard]] Real GetCurrentLength(const PhysicsWorld& w) const noexcept;
+
         private:
+            [[nodiscard]] bool Legacy() const noexcept
+            {
+                return !m_enableSpring && !m_enableLimit
+                    && m_localA.x == Real(0) && m_localA.y == Real(0)
+                    && m_localB.x == Real(0) && m_localB.y == Real(0);
+            }
+            void SolveLegacy(PhysicsWorld& w);
+            void WarmStart(PhysicsWorld& w);
+            void SolveSoft(PhysicsWorld& w, bool useBias);
+
             BodyHandle    m_hA, m_hB;
             std::uint32_t m_ia = kInvalidSlot, m_ib = kInvalidSlot;
             Real          m_length = Real(0);
-            // Prepared per step.
+            Vec2          m_localA{ Real(0), Real(0) }; // anchor in A's frame (from its origin)
+            Vec2          m_localB{ Real(0), Real(0) }; // anchor in B's frame (from its origin)
+            // Box2D b2DistanceJoint parameters.
+            bool m_enableSpring = false;
+            Real m_hertz = Real(0), m_dampingRatio = Real(0);
+            bool m_enableLimit = false;
+            Real m_minLength = kLinearSlop, m_maxLength = kDistanceJointHuge;
+            // Prepared per step (legacy path).
             Real m_ux = Real(1), m_uy = Real(0); // unit A->B axis
             Real m_bias = Real(0);
             Real m_mass = Real(0);
+            // Prepared per step / tracked per sub-step (Box2D path).
+            Real m_h = Real(0);
+            Real m_axialMass = Real(0);
+            Real m_springBiasRate = Real(0), m_springMassScale = Real(1), m_springImpulseScale = Real(0);
+            Real m_softBiasRate = Real(0), m_softMassScale = Real(1), m_softImpulseScale = Real(0);
+            // start-of-step arms (from the centres of mass) and centre offset
+            Vec2 m_rA0{ Real(0), Real(0) }, m_rB0{ Real(0), Real(0) }, m_dc0{ Real(0), Real(0) };
+            Vec2 m_dpA{ Real(0), Real(0) }, m_dpB{ Real(0), Real(0) };
+            Real m_daA = Real(0), m_daB = Real(0);
+            // accumulated (warm-started across sub-steps and steps)
+            Real m_impulse = Real(0), m_lowerImpulse = Real(0), m_upperImpulse = Real(0);
+            bool m_substepping = false; // the solver calls BeginSubstep (SoftStep)
+            int  m_pass = 0;            // joint pass within the sub-step
         };
 
         // ================================================================

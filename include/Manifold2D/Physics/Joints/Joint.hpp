@@ -70,7 +70,12 @@ namespace Manifold2D
         // ----------------------------------------------------------------
         //
         // PORT mapping (Joints.make, Joints.lua:182-227):
-        //   Distance : length (defaults to current |B - A| if <= 0).
+        //   Distance : length (defaults to the current anchor-to-anchor distance
+        //              if <= 0); Box2D v3 b2DistanceJointDef's local anchors
+        //              (localAnchorA, localAnchorB), limit (enableLimit,
+        //              minLength, maxLength) and spring (enableSpring,
+        //              frequencyHz, dampingRatio). A rope is enableSpring with
+        //              frequencyHz 0 plus enableLimit [0, maxLength].
         //   Revolute : anchor (world point shared by A and B at creation).
         //   Weld     : anchor (as revolute) + the relative angle is locked to
         //              its value at creation.
@@ -101,6 +106,14 @@ namespace Manifold2D
 
             // Distance.
             Real length = Real(-1);    // <= 0 -> use the current separation
+            // Distance anchors, in each body's local frame (relative to its
+            // origin; Box2D localAnchorA/B). (0, 0) is the body origin.
+            Vec2 localAnchorA{ Real(0), Real(0) };
+            Vec2 localAnchorB{ Real(0), Real(0) };
+            // Distance limit (with enableLimit, and only while the spring is on):
+            // minLength <= length <= maxLength. Clamped to [kLinearSlop, 1e5].
+            Real minLength = Real(0);
+            Real maxLength = Real(100000);
 
             // Revolute / Weld / Wheel: world anchor point at creation.
             Vec2 anchor{ Real(0), Real(0) };
@@ -112,12 +125,15 @@ namespace Manifold2D
             Real referenceAngle = Real(0);
             // Revolute limit: lowerAngle <= joint angle <= upperAngle (radians;
             // Box2D documents a usable range of about +-0.99 pi). enableLimit also
-            // switches on the Prismatic limit (lower/upperTranslation below).
+            // switches on the Prismatic limit (lower/upperTranslation below) and
+            // the Distance limit (minLength/maxLength above).
             bool enableLimit = false;
             Real lowerAngle  = Real(0);
             Real upperAngle  = Real(0);
             // Revolute spring: drives the joint angle to targetAngle, soft at
-            // (frequencyHz, dampingRatio) below.
+            // (frequencyHz, dampingRatio) below. enableSpring also switches on the
+            // Distance spring (rest length `length`; frequencyHz 0 = no length
+            // constraint).
             bool enableSpring = false;
             Real targetAngle  = Real(0);
 
@@ -136,8 +152,9 @@ namespace Manifold2D
             Vec2 target{ Real(0), Real(0) };
             Real maxForce = Real(1e6);
 
-            // Wheel suspension spring (b2WheelJoint), and the Revolute spring when
-            // enableSpring. frequencyHz <= 0 -> a rigid
+            // Wheel suspension spring (b2WheelJoint), and the Revolute and
+            // Distance springs when enableSpring (NOTE: the default 4 Hz applies to
+            // them too; a Distance rope sets frequencyHz = 0). frequencyHz <= 0 -> a rigid
             // axis constraint (no suspension travel). dampingRatio is the spring's
             // zeta (1 = critically damped).
             Real frequencyHz  = Real(4);

@@ -451,6 +451,21 @@ public:
         d.length = static_cast<Real>(length);
         return addJoint(a, b, d);
     }
+    // Distance between ANCHOR points (b2DistanceJointDef localAnchorA/B):
+    // world point (ax, ay) on A and (bx, by) on B, converted to each body's
+    // local frame now, so the joint torques both bodies (a sling on a corner,
+    // a two-leg bridle). `length` <= 0: the current distance between the
+    // anchors. Rigid until setDistanceSpring / setDistanceLimits say otherwise.
+    int addDistanceJointAt(int a, int b, float ax, float ay, float bx, float by, float length)
+    {
+        JointDef d;
+        d.kind = JointKind::Distance;
+        if (!handle(a, d.a) || !handle(b, d.b) || a == b) { return -1; }
+        d.localAnchorA = toLocal(d.a, ax, ay);
+        d.localAnchorB = toLocal(d.b, bx, by);
+        d.length = static_cast<Real>(length);
+        return storeJoint(m_world->AddJoint(d));
+    }
     // Revolute: pin A and B at world point (ax, ay).
     int addRevoluteJoint(int a, int b, float ax, float ay)
     {
@@ -634,6 +649,43 @@ public:
         const Joint* j = joint(id);
         const auto* pj = j != nullptr ? dynamic_cast<const PrismaticJoint*>(j) : nullptr;
         return pj != nullptr ? static_cast<float>(pj->GetTranslation(*m_world)) : std::numeric_limits<float>::quiet_NaN();
+    }
+
+    // ---- distance joint (b2DistanceJoint_*) ---------------------------------
+    // Box2D's rules: the limit is solved only while the spring is ON (with the
+    // spring off the joint is a rigid rod at its length); a spring of 0 Hz is
+    // no length constraint at all. So a ROPE -- slack when the bodies close in,
+    // holding at maxLength when pulled -- is
+    //   setDistanceSpring(id, true, 0, 0); setDistanceLimits(id, true, 0, maxLength);
+    // Lengths are clamped to [0.005, 100000] m (a rope's 0 becomes 5 mm) and
+    // sorted. false for any other joint kind or a dead id; wakes the bodies.
+    bool setDistanceLimits(int id, bool enable, float minLength, float maxLength)
+    {
+        DistanceJoint* dj = distanceJoint(joint(id));
+        if (dj == nullptr) { return false; }
+        dj->EnableLimit(enable);
+        dj->SetLengthRange(static_cast<Real>(minLength), static_cast<Real>(maxLength));
+        wakeJoint(dj);
+        return true;
+    }
+    // The length as a spring-damper about the joint's length at `hertz` with
+    // `dampingRatio` (1 = critical), or off (rigid). hertz 0: no length
+    // constraint (a rope, with setDistanceLimits).
+    bool setDistanceSpring(int id, bool enable, float hertz, float dampingRatio)
+    {
+        DistanceJoint* dj = distanceJoint(joint(id));
+        if (dj == nullptr) { return false; }
+        dj->EnableSpring(enable);
+        dj->SetSpring(static_cast<Real>(hertz), static_cast<Real>(dampingRatio));
+        wakeJoint(dj);
+        return true;
+    }
+    // The distance joint's current anchor-to-anchor length (m); NaN for any
+    // other joint or a dead id.
+    float jointLength(int id) const
+    {
+        const DistanceJoint* dj = distanceJoint(joint(id));
+        return dj != nullptr ? static_cast<float>(dj->GetCurrentLength(*m_world)) : std::numeric_limits<float>::quiet_NaN();
     }
 
     // What joint `id` carried over the last step (b2Joint_GetConstraintForce /
@@ -1047,6 +1099,19 @@ private:
         if (id < 0 || static_cast<std::size_t>(id) >= m_joints.size()) { return nullptr; }
         return m_joints[static_cast<std::size_t>(id)];
     }
+    static DistanceJoint* distanceJoint(Joint* j)
+    {
+        return j != nullptr ? dynamic_cast<DistanceJoint*>(j) : nullptr;
+    }
+    // A world point in body h's local frame (relative to its origin).
+    Vec2 toLocal(BodyHandle h, float x, float y) const
+    {
+        const Vec2 p = m_world->Position(h);
+        const Real a = m_world->GetAngle(h);
+        const Real dx = static_cast<Real>(x) - p.x, dy = static_cast<Real>(y) - p.y;
+        const Real c = std::cos(a), sn = std::sin(a);
+        return Vec2(c * dx + sn * dy, -sn * dx + c * dy);
+    }
     // a plain revolute joint (a weld derives from it but is not one)
     static RevoluteJoint* revolute(Joint* j)
     {
@@ -1190,6 +1255,7 @@ EMSCRIPTEN_BINDINGS(manifold)
         .function("applyImpulse",        &ManifoldSim::applyImpulse)
         .function("setKinematic",        &ManifoldSim::setKinematic)
         .function("addDistanceJoint",    &ManifoldSim::addDistanceJoint)
+        .function("addDistanceJointAt",  &ManifoldSim::addDistanceJointAt)
         .function("addRevoluteJoint",    &ManifoldSim::addRevoluteJoint)
         .function("addWeldJoint",        &ManifoldSim::addWeldJoint)
         .function("addPrismaticJoint",   &ManifoldSim::addPrismaticJoint)
@@ -1206,6 +1272,9 @@ EMSCRIPTEN_BINDINGS(manifold)
         .function("jointAngle",          &ManifoldSim::jointAngle)
         .function("setPrismaticLimits",  &ManifoldSim::setPrismaticLimits)
         .function("jointTranslation",    &ManifoldSim::jointTranslation)
+        .function("setDistanceLimits",   &ManifoldSim::setDistanceLimits)
+        .function("setDistanceSpring",   &ManifoldSim::setDistanceSpring)
+        .function("jointLength",         &ManifoldSim::jointLength)
         .function("jointReaction",       &ManifoldSim::jointReaction)
         .function("castRayClosest",      &ManifoldSim::castRayClosest)
         .function("setFilterGroup",      &ManifoldSim::setFilterGroup)

@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 #include <Manifold2D/Physics/PhysicsWorld.hpp>
 #include <Manifold2D/Physics/Joints/JointMath.hpp>
@@ -41,39 +42,249 @@ namespace Manifold2D
                 const Real s   = std::sin(-ang);
                 return Vec2(dx * c - dy * s, dx * s + dy * c);
             }
+
+            Vec2 RotateBy(Real a, Vec2 v) noexcept
+            {
+                const Real c = std::cos(a), s = std::sin(a);
+                return Vec2(c * v.x - s * v.y, s * v.x + c * v.y);
+            }
         } // namespace
 
         // =================================================================
-        // DistanceJoint -- PORT of Joints.lua Distance (lines 44-67).
+        // DistanceJoint -- PORT of Joints.lua Distance (lines 44-67), plus
+        // Box2D v3 b2DistanceJoint (distance_joint.c).
         // =================================================================
+
+        void DistanceJoint::SetLength(Real length) noexcept
+        {
+            m_length = std::clamp(length, kLinearSlop, kDistanceJointHuge);
+            m_impulse = m_lowerImpulse = m_upperImpulse = Real(0);
+        }
+
+        void DistanceJoint::SetLengthRange(Real minLength, Real maxLength) noexcept
+        {
+            minLength = std::clamp(minLength, kLinearSlop, kDistanceJointHuge);
+            maxLength = std::clamp(maxLength, kLinearSlop, kDistanceJointHuge);
+            m_minLength = std::min(minLength, maxLength);
+            m_maxLength = std::max(minLength, maxLength);
+            m_impulse = m_lowerImpulse = m_upperImpulse = Real(0);
+        }
+
+        Real DistanceJoint::GetCurrentLength(const PhysicsWorld& w) const noexcept
+        {
+            // Position() reads (0, 0) for an invalid handle, as JointMath::Pos does
+            const Real angA = w.IsValid(m_hA) ? w.GetAngle(m_hA) : Real(0);
+            const Real angB = w.IsValid(m_hB) ? w.GetAngle(m_hB) : Real(0);
+            const Vec2 pa = w.Position(m_hA), pb = w.Position(m_hB);
+            const Vec2 ra = RotateBy(angA, m_localA), rb = RotateBy(angB, m_localB);
+            const Real dx = (pb.x + rb.x) - (pa.x + ra.x);
+            const Real dy = (pb.y + rb.y) - (pa.y + ra.y);
+            return std::sqrt(dx * dx + dy * dy);
+        }
 
         void DistanceJoint::Prepare(PhysicsWorld& w, Real dt)
         {
             m_ia = w.IsValid(m_hA) ? m_hA.index : kInvalidSlot;
             m_ib = w.IsValid(m_hB) ? m_hB.index : kInvalidSlot;
+            m_substepping = false;
+            m_pass = 0;
 
-            const Vec2 a = JointMath::Pos(w, m_ia);
-            const Vec2 b = JointMath::Pos(w, m_ib);
-            const Real dx = b.x - a.x;
-            const Real dy = b.y - a.y;
-            const Real d = std::sqrt(dx * dx + dy * dy);
-            if (d > Real(1e-9))
+            if (Legacy())
             {
-                m_ux = dx / d;
-                m_uy = dy / d;
+                // The Lua port, unchanged (see the class comment).
+                m_impulse = m_lowerImpulse = m_upperImpulse = Real(0);
+                const Vec2 a = JointMath::Pos(w, m_ia);
+                const Vec2 b = JointMath::Pos(w, m_ib);
+                const Real dx = b.x - a.x;
+                const Real dy = b.y - a.y;
+                const Real d = std::sqrt(dx * dx + dy * dy);
+                if (d > Real(1e-9))
+                {
+                    m_ux = dx / d;
+                    m_uy = dy / d;
+                }
+                else
+                {
+                    m_ux = Real(1);
+                    m_uy = Real(0);
+                }
+                m_bias = kJointBeta * InvDt(dt) * (d - m_length);
+
+                const Real m = JointMath::InvMass(w, m_ia) + JointMath::InvMass(w, m_ib);
+                m_mass = m > Real(0) ? Real(1) / m : Real(0);
+                return;
+            }
+
+            // b2PrepareDistanceJoint: the start-of-step arms from each centre of
+            // mass (Box2D: rotate(q, localOriginAnchor - localCenter)), the centre
+            // offset, and the axial mass along the start-of-step axis.
+            m_h = dt;
+            const Real angA = JointMath::Angle(w, m_ia), angB = JointMath::Angle(w, m_ib);
+            const Vec2 lcA = JointMath::Valid(m_ia) ? w.LocalCenterSlot(m_ia) : Vec2(Real(0), Real(0));
+            const Vec2 lcB = JointMath::Valid(m_ib) ? w.LocalCenterSlot(m_ib) : Vec2(Real(0), Real(0));
+            m_rA0 = RotateBy(angA, Vec2(m_localA.x - lcA.x, m_localA.y - lcA.y));
+            m_rB0 = RotateBy(angB, Vec2(m_localB.x - lcB.x, m_localB.y - lcB.y));
+            const Vec2 cA0 = RotateBy(angA, lcA), cB0 = RotateBy(angB, lcB);
+            const Vec2 pa = JointMath::Pos(w, m_ia), pb = JointMath::Pos(w, m_ib);
+            m_dc0 = Vec2((pb.x + cB0.x) - (pa.x + cA0.x), (pb.y + cB0.y) - (pa.y + cA0.y));
+            m_dpA = m_dpB = Vec2(Real(0), Real(0));
+            m_daA = m_daB = Real(0);
+
+            const Vec2 sep(m_dc0.x + m_rB0.x - m_rA0.x, m_dc0.y + m_rB0.y - m_rA0.y);
+            const Real len = std::sqrt(sep.x * sep.x + sep.y * sep.y);
+            const Vec2 axis = len > std::numeric_limits<Real>::epsilon() ? Vec2(sep.x / len, sep.y / len) : Vec2(Real(0), Real(0));
+            const Real crA = m_rA0.x * axis.y - m_rA0.y * axis.x;
+            const Real crB = m_rB0.x * axis.y - m_rB0.y * axis.x;
+            const Real k = JointMath::InvMass(w, m_ia) + JointMath::InvMass(w, m_ib)
+                         + JointMath::InvInertia(w, m_ia) * crA * crA + JointMath::InvInertia(w, m_ib) * crB * crB;
+            m_axialMass = k > Real(0) ? Real(1) / k : Real(0);
+
+            const SoftCoeffs spring = MakeSoft(m_hertz, m_dampingRatio, dt);
+            m_springBiasRate = spring.biasRate; m_springMassScale = spring.massScale; m_springImpulseScale = spring.impulseScale;
+            const Real constraintHertz = dt > Real(0) ? std::min(kJointConstraintHertz, Real(0.25) / dt) : Real(0);
+            const SoftCoeffs soft = MakeSoft(constraintHertz, kJointConstraintDampingRatio, dt);
+            m_softBiasRate = soft.biasRate; m_softMassScale = soft.massScale; m_softImpulseScale = soft.impulseScale;
+
+            // The accumulated impulses warm start this step, as Box2D's do -- but
+            // only those of the parts that will be solved: Box2D's warm start
+            // re-applies all three whatever is enabled, so a part switched off
+            // would keep pushing with its last impulse.
+            const bool springMode = m_enableSpring && (m_minLength < m_maxLength || !m_enableLimit);
+            if (springMode && m_hertz <= Real(0)) { m_impulse = Real(0); }
+            if (!springMode || !m_enableLimit) { m_lowerImpulse = m_upperImpulse = Real(0); }
+        }
+
+        void DistanceJoint::WarmStart(PhysicsWorld& w)
+        {
+            // b2WarmStartDistanceJoint: the accumulated axial impulse along the
+            // current axis at the current arms, re-applied in full at the start of
+            // the sub-step (delivered again, so it is reaction too)
+            const Real j = m_impulse + m_lowerImpulse - m_upperImpulse;
+            if (j == Real(0)) { return; }
+            const Vec2 rA = RotateBy(m_daA, m_rA0), rB = RotateBy(m_daB, m_rB0);
+            const Vec2 sep(m_dc0.x + (m_dpB.x - m_dpA.x) + (rB.x - rA.x),
+                           m_dc0.y + (m_dpB.y - m_dpA.y) + (rB.y - rA.y));
+            const Real len = std::sqrt(sep.x * sep.x + sep.y * sep.y);
+            if (!(len > std::numeric_limits<Real>::epsilon())) { return; }
+            const Vec2 P(sep.x / len * j, sep.y / len * j);
+            JointMath::ApplyAt(w, m_ia, -P.x, -P.y, rA.x, rA.y);
+            JointMath::ApplyAt(w, m_ib, P.x, P.y, rB.x, rB.y);
+            AddReaction(P.x, P.y);
+        }
+
+        void DistanceJoint::SolveSoft(PhysicsWorld& w, bool useBias)
+        {
+            // b2SolveDistanceJoint: the current arms and separation (start offset
+            // + in-flight motion + arms)
+            const Vec2 rA = RotateBy(m_daA, m_rA0), rB = RotateBy(m_daB, m_rB0);
+            const Vec2 sep(m_dc0.x + (m_dpB.x - m_dpA.x) + (rB.x - rA.x),
+                           m_dc0.y + (m_dpB.y - m_dpA.y) + (rB.y - rA.y));
+            const Real length = std::sqrt(sep.x * sep.x + sep.y * sep.y);
+            const Vec2 axis = length > std::numeric_limits<Real>::epsilon()
+                            ? Vec2(sep.x / length, sep.y / length) : Vec2(Real(0), Real(0));
+            const auto cdot = [&]()
+            {
+                const Vec2 va = JointMath::Vat(w, m_ia, rA.x, rA.y);
+                const Vec2 vb = JointMath::Vat(w, m_ib, rB.x, rB.y);
+                return (vb.x - va.x) * axis.x + (vb.y - va.y) * axis.y;
+            };
+            const auto apply = [&](Real impulse)
+            {
+                const Vec2 P(axis.x * impulse, axis.y * impulse);
+                JointMath::ApplyAt(w, m_ia, -P.x, -P.y, rA.x, rA.y);
+                JointMath::ApplyAt(w, m_ib, P.x, P.y, rB.x, rB.y);
+                AddReaction(P.x, P.y);
+            };
+            // Box2D's b2CreateDistanceJoint clamps the length to the linear slop
+            const Real restLength = std::max(m_length, kLinearSlop);
+
+            // soft if the spring is on and the limit is off or spans a range
+            if (m_enableSpring && (m_minLength < m_maxLength || !m_enableLimit))
+            {
+                if (m_hertz > Real(0))
+                {
+                    const Real C = length - restLength;
+                    const Real bias = m_springBiasRate * C;
+                    const Real impulse = -m_springMassScale * m_axialMass * (cdot() + bias) - m_springImpulseScale * m_impulse;
+                    m_impulse += impulse;
+                    apply(impulse);
+                }
+
+                if (m_enableLimit)
+                {
+                    const Real invH = InvDt(m_h);
+                    // lower: C = length - minLength >= 0
+                    {
+                        const Real C = length - m_minLength;
+                        Real bias = Real(0), massScale = Real(1), impulseScale = Real(0);
+                        if (C > Real(0)) { bias = C * invH; } // speculative
+                        else if (useBias) { bias = m_softBiasRate * C; massScale = m_softMassScale; impulseScale = m_softImpulseScale; }
+                        const Real old = m_lowerImpulse;
+                        const Real impulse = -massScale * m_axialMass * (cdot() + bias) - impulseScale * old;
+                        m_lowerImpulse = std::max(Real(0), old + impulse);
+                        apply(m_lowerImpulse - old);
+                    }
+                    // upper: C = maxLength - length >= 0 (signs flipped to keep C and the impulse positive)
+                    {
+                        const Real C = m_maxLength - length;
+                        Real bias = Real(0), massScale = Real(1), impulseScale = Real(0);
+                        if (C > Real(0)) { bias = C * invH; }
+                        else if (useBias) { bias = m_softBiasRate * C; massScale = m_softMassScale; impulseScale = m_softImpulseScale; }
+                        const Real old = m_upperImpulse;
+                        const Real impulse = -massScale * m_axialMass * (-cdot() + bias) - impulseScale * old;
+                        m_upperImpulse = std::max(Real(0), old + impulse);
+                        apply(-(m_upperImpulse - old));
+                    }
+                }
             }
             else
             {
-                m_ux = Real(1);
-                m_uy = Real(0);
+                // rigid: soft at the joint softness on the biased pass, rigid and
+                // bias-free on the relax pass
+                const Real C = length - restLength;
+                Real bias = Real(0), massScale = Real(1), impulseScale = Real(0);
+                if (useBias) { bias = m_softBiasRate * C; massScale = m_softMassScale; impulseScale = m_softImpulseScale; }
+                const Real impulse = -massScale * m_axialMass * (cdot() + bias) - impulseScale * m_impulse;
+                m_impulse += impulse;
+                apply(impulse);
             }
-            m_bias = kJointBeta * InvDt(dt) * (d - m_length);
-
-            const Real m = JointMath::InvMass(w, m_ia) + JointMath::InvMass(w, m_ib);
-            m_mass = m > Real(0) ? Real(1) / m : Real(0);
         }
 
         void DistanceJoint::SolveVelocity(PhysicsWorld& w)
+        {
+            if (Legacy())
+            {
+                SolveLegacy(w);
+                return;
+            }
+            // Under SoftStep, pass #2 of a sub-step follows the position
+            // integration: take in the motion it just integrated first (as the
+            // revolute joint does). Pass #1 is the biased pass and warm starts.
+            // Without sub-steps (no BeginSubstep) every pass is biased and the
+            // impulses start from zero each step.
+            bool useBias = true;
+            if (m_substepping)
+            {
+                if (m_pass == 1)
+                {
+                    const Real wa = JointMath::AngVel(w, m_ia), wb = JointMath::AngVel(w, m_ib);
+                    const Vec2 va = JointMath::Vat(w, m_ia, Real(0), Real(0)), vb = JointMath::Vat(w, m_ib, Real(0), Real(0));
+                    m_daA += wa * m_h; m_daB += wb * m_h;
+                    m_dpA = Vec2(m_dpA.x + va.x * m_h, m_dpA.y + va.y * m_h);
+                    m_dpB = Vec2(m_dpB.x + vb.x * m_h, m_dpB.y + vb.y * m_h);
+                }
+                useBias = m_pass == 0;
+                if (m_pass == 0) { WarmStart(w); }
+                ++m_pass;
+            }
+            else if (m_pass++ == 0)
+            {
+                m_impulse = m_lowerImpulse = m_upperImpulse = Real(0);
+            }
+            SolveSoft(w, useBias);
+        }
+
+        void DistanceJoint::SolveLegacy(PhysicsWorld& w)
         {
             const Vec2 va = JointMath::Vat(w, m_ia, Real(0), Real(0));
             const Vec2 vb = JointMath::Vat(w, m_ib, Real(0), Real(0));
@@ -170,15 +381,6 @@ namespace Manifold2D
             if (m_substepping) { SolvePointSoft(w, useBias); }
             else { SolvePoint(w); }
         }
-
-        namespace
-        {
-            Vec2 RotateBy(Real a, Vec2 v) noexcept
-            {
-                const Real c = std::cos(a), s = std::sin(a);
-                return Vec2(c * v.x - s * v.y, s * v.x + c * v.y);
-            }
-        } // namespace
 
         void RevoluteJoint::WarmStartPoint(PhysicsWorld& w)
         {
@@ -719,16 +921,31 @@ namespace Manifold2D
             {
             case JointKind::Distance:
             {
+                const Vec2 la = def.localAnchorA, lb = def.localAnchorB;
+                const bool centres = la.x == Real(0) && la.y == Real(0) && lb.x == Real(0) && lb.y == Real(0);
                 Real length = def.length;
                 if (length <= Real(0))
                 {
-                    const Vec2 pa = w.Position(def.a);
-                    const Vec2 pb = w.Position(def.b);
+                    Vec2 pa = w.Position(def.a);
+                    Vec2 pb = w.Position(def.b);
+                    if (!centres)
+                    {
+                        // the current distance between the anchor points
+                        const Vec2 ra = RotateBy(w.IsValid(def.a) ? w.GetAngle(def.a) : Real(0), la);
+                        const Vec2 rb = RotateBy(w.IsValid(def.b) ? w.GetAngle(def.b) : Real(0), lb);
+                        pa = Vec2(pa.x + ra.x, pa.y + ra.y);
+                        pb = Vec2(pb.x + rb.x, pb.y + rb.y);
+                    }
                     const Real dx = pb.x - pa.x;
                     const Real dy = pb.y - pa.y;
                     length = std::sqrt(dx * dx + dy * dy);
                 }
-                return std::make_unique<DistanceJoint>(def.a, def.b, length);
+                auto j = std::make_unique<DistanceJoint>(def.a, def.b, length, la, lb);
+                j->EnableSpring(def.enableSpring);
+                j->SetSpring(def.frequencyHz, def.dampingRatio);
+                j->EnableLimit(def.enableLimit);
+                j->SetLengthRange(def.minLength, def.maxLength);
+                return j;
             }
             case JointKind::Revolute:
             case JointKind::Weld:
