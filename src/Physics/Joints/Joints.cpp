@@ -81,6 +81,7 @@ namespace Manifold2D
             const Real j = -(vn + m_bias) * m_mass;
             JointMath::ApplyAt(w, m_ia, -m_ux * j, -m_uy * j, Real(0), Real(0));
             JointMath::ApplyAt(w, m_ib, m_ux * j, m_uy * j, Real(0), Real(0));
+            AddReaction(m_ux * j, m_uy * j);
         }
 
         // =================================================================
@@ -184,6 +185,7 @@ namespace Manifold2D
             const Vec2 rA = RotateBy(m_daA, m_rA0), rB = RotateBy(m_daB, m_rB0);
             JointMath::ApplyAt(w, m_ib, m_linearImpulse.x, m_linearImpulse.y, rB.x, rB.y);
             JointMath::ApplyAt(w, m_ia, -m_linearImpulse.x, -m_linearImpulse.y, rA.x, rA.y);
+            AddReaction(m_linearImpulse.x, m_linearImpulse.y); // re-applied in full: delivered again this sub-step
         }
 
         void RevoluteJoint::SolvePointSoft(PhysicsWorld& w, bool useBias)
@@ -211,6 +213,7 @@ namespace Manifold2D
             m_linearImpulse = Vec2(m_linearImpulse.x + impulse.x, m_linearImpulse.y + impulse.y);
             JointMath::ApplyAt(w, m_ib, impulse.x, impulse.y, rB.x, rB.y);
             JointMath::ApplyAt(w, m_ia, -impulse.x, -impulse.y, rA.x, rA.y);
+            AddReaction(impulse.x, impulse.y);
         }
 
         void RevoluteJoint::SolveAngular(PhysicsWorld& w, bool useBias)
@@ -225,6 +228,7 @@ namespace Manifold2D
             {
                 JointMath::ApplyAngular(w, m_ia, -impulse);
                 JointMath::ApplyAngular(w, m_ib, impulse);
+                AddReactionTorque(impulse);
             };
 
             if (m_enableSpring)
@@ -284,6 +288,7 @@ namespace Manifold2D
                                                  dvx, dvy);
             JointMath::ApplyAt(w, m_ib, j.x, j.y, m_rB.x, m_rB.y);
             JointMath::ApplyAt(w, m_ia, -j.x, -j.y, m_rA.x, m_rA.y);
+            AddReaction(j.x, j.y);
         }
 
         // =================================================================
@@ -306,6 +311,7 @@ namespace Manifold2D
             const Real j = -dw * m_angMass;
             JointMath::ApplyAngular(w, m_ia, -j);
             JointMath::ApplyAngular(w, m_ib, j);
+            AddReactionTorque(j);
         }
 
         // =================================================================
@@ -358,6 +364,7 @@ namespace Manifold2D
                 impulse = m_motorImpulse - old;
                 JointMath::ApplyAt(w, m_ia, -m_axis.x * impulse, -m_axis.y * impulse, Real(0), Real(0));
                 JointMath::ApplyAt(w, m_ib, m_axis.x * impulse, m_axis.y * impulse, Real(0), Real(0));
+                AddReaction(m_axis.x * impulse, m_axis.y * impulse);
             }
 
             const Vec2 va = JointMath::Vat(w, m_ia, Real(0), Real(0));
@@ -366,11 +373,13 @@ namespace Manifold2D
             const Real j = -(vp + m_bias) * m_mass;
             JointMath::ApplyAt(w, m_ia, -m_px * j, -m_py * j, Real(0), Real(0));
             JointMath::ApplyAt(w, m_ib, m_px * j, m_py * j, Real(0), Real(0));
+            AddReaction(m_px * j, m_py * j);
 
             const Real dw = JointMath::AngVel(w, m_ib) - JointMath::AngVel(w, m_ia) + m_angBias;
             const Real ja = -dw * m_angMass;
             JointMath::ApplyAngular(w, m_ia, -ja);
             JointMath::ApplyAngular(w, m_ib, ja);
+            AddReactionTorque(ja);
         }
 
         // =================================================================
@@ -405,6 +414,7 @@ namespace Manifold2D
                 fy = fy / f * m_maxForce;
             }
             JointMath::ApplyAt(w, m_ib, fx * m_dt, fy * m_dt, Real(0), Real(0));
+            AddReaction(fx * m_dt, fy * m_dt);
         }
 
         // =================================================================
@@ -501,6 +511,7 @@ namespace Manifold2D
                 impulse = m_motorImpulse - old;
                 wA -= iIa * impulse;
                 wB += iIb * impulse;
+                AddReactionTorque(impulse);
             }
 
             // ---- axis spring (soft suspension) -------------------------------
@@ -519,6 +530,7 @@ namespace Manifold2D
                 vB.x += iMb * P.x;
                 vB.y += iMb * P.y;
                 wB += iIb * impulse * m_sBa;
+                AddReaction(P.x, P.y);
             }
 
             // ---- perpendicular (rigid) constraint ----------------------------
@@ -534,6 +546,7 @@ namespace Manifold2D
                 vB.x += iMb * P.x;
                 vB.y += iMb * P.y;
                 wB += iIb * impulse * m_sBp;
+                AddReaction(P.x, P.y);
             }
 
             // Write back (no-op on static / invalid through the guards).
@@ -584,6 +597,7 @@ namespace Manifold2D
             impulse = m_impulse - old;
             JointMath::ApplyAngular(w, m_ia, -impulse);
             JointMath::ApplyAngular(w, m_ib, impulse);
+            AddReactionTorque(impulse);
         }
 
         // =================================================================

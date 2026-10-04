@@ -610,6 +610,30 @@ public:
         const RevoluteJoint* rj = revolute(joint(id));
         return rj != nullptr ? static_cast<float>(rj->JointAngle(*m_world)) : std::numeric_limits<float>::quiet_NaN();
     }
+    // What joint `id` carried over the last step (b2Joint_GetConstraintForce /
+    // b2Joint_GetConstraintTorque): [fx, fy, torque] -- the force in N, world
+    // frame, acting on the joint's body B (the second body passed to add*Joint;
+    // A feels the opposite), and the joint's pure angular torque in N m (an
+    // angle lock, motor, spring or limit; not the force's moment). Averaged over
+    // the step: the impulse delivered across its sub-steps / dt. A breakable
+    // joint compares hypot(fx, fy) or |torque| to its threshold after each
+    // step() and calls removeJoint. A sleeping joint keeps its last reading.
+    // NaN x 3 for a dead id. A typed_memory_view: copy before the next call.
+    emscripten::val jointReaction(int id)
+    {
+        const Joint* j = joint(id);
+        if (j == nullptr)
+        {
+            m_reactBuf.fill(std::numeric_limits<float>::quiet_NaN());
+        }
+        else
+        {
+            const Vec2 f = m_world->JointReactionForce(j);
+            m_reactBuf = { static_cast<float>(f.x), static_cast<float>(f.y),
+                           static_cast<float>(m_world->JointReactionTorque(j)) };
+        }
+        return emscripten::val(emscripten::typed_memory_view(m_reactBuf.size(), m_reactBuf.data()));
+    }
 
     // ---- queries -----------------------------------------------------------
     // The nearest fixture the ray (ox, oy) -> (ox + tx, oy + ty) hits
@@ -1101,6 +1125,7 @@ private:
     std::vector<Kin>              m_kin;      // kinematic bodies with a binding-advanced angle
     std::vector<float>            m_contactsBuf; // contacts()'s backing store
     std::array<float, 8>          m_rayBuf{};    // castRayClosest()'s backing store
+    std::array<float, 3>          m_reactBuf{};  // jointReaction()'s backing store
 };
 
 EMSCRIPTEN_BINDINGS(manifold)
@@ -1153,6 +1178,7 @@ EMSCRIPTEN_BINDINGS(manifold)
         .function("setRevoluteLimits",   &ManifoldSim::setRevoluteLimits)
         .function("setRevoluteSpring",   &ManifoldSim::setRevoluteSpring)
         .function("jointAngle",          &ManifoldSim::jointAngle)
+        .function("jointReaction",       &ManifoldSim::jointReaction)
         .function("castRayClosest",      &ManifoldSim::castRayClosest)
         .function("setFilterGroup",      &ManifoldSim::setFilterGroup)
         .function("setBodyOptions",      &ManifoldSim::setBodyOptions)

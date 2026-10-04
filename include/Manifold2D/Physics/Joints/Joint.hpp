@@ -186,6 +186,63 @@ namespace Manifold2D
             // membership test (PhysicsWorld.lua:281-286).
             [[nodiscard]] virtual BodyHandle HandleA() const noexcept = 0;
             [[nodiscard]] virtual BodyHandle HandleB() const noexcept = 0;
+
+            // ---- reaction (Box2D v3 b2Joint_GetConstraintForce / _GetConstraintTorque)
+            //
+            // The force (N, world frame) and the torque (N m) this joint applied
+            // to body B over the last step it was solved in -- what a breakable
+            // joint compares against its threshold. The force is every linear
+            // impulse the joint's constraints put on B (point, axis, motor,
+            // spring); the torque is only its PURE angular impulses (an angle
+            // lock, a motor, a spring, a limit), not the moment r x F of the
+            // force about B's centre -- Box2D's split.
+            //
+            // DEFINITION: the total impulse delivered to B over the step, divided
+            // by the step dt. Box2D reports its accumulated impulse J times
+            // inv_h (the SUB-step inverse); that J is warm-started, i.e. applied
+            // in full again every sub-step, so over one step of N sub-steps the
+            // joint delivers sum_k J_k and sum_k J_k / (N h) is the mean of
+            // Box2D's per-sub-step reading -- equal to it when J is steady (a
+            // load at rest, a stalled motor) and smoothed over the step in a
+            // transient. This engine's Baumgarte joints carry no accumulated
+            // impulse (each pass applies a fresh one), so the delivered sum is
+            // the one definition that holds for every kind; it is pure
+            // bookkeeping and changes no solve.
+            //
+            // The world opens the window (BeginReactionWindow) for every joint it
+            // hands the solver; a sleeping joint keeps its last awake reading, as
+            // Box2D's keeps its impulses. Zero before the first solved step.
+            [[nodiscard]] Vec2 ReactionForce() const noexcept
+            {
+                const Real inv = m_reactionDt > Real(0) ? Real(1) / m_reactionDt : Real(0);
+                return Vec2(m_reactionImpulse.x * inv, m_reactionImpulse.y * inv);
+            }
+            [[nodiscard]] Real ReactionTorque() const noexcept
+            {
+                return m_reactionDt > Real(0) ? m_reactionAngularImpulse / m_reactionDt : Real(0);
+            }
+            // Reset the per-step sums for a step of length `dt` (called by
+            // PhysicsWorld before the solve, not by the solver).
+            void BeginReactionWindow(Real dt) noexcept
+            {
+                m_reactionImpulse = Vec2(Real(0), Real(0));
+                m_reactionAngularImpulse = Real(0);
+                m_reactionDt = dt;
+            }
+
+        protected:
+            // Record an impulse the joint just applied to body B (A gets the
+            // opposite). Every SolveVelocity path calls these beside its apply.
+            void AddReaction(Real jx, Real jy) noexcept
+            {
+                m_reactionImpulse = Vec2(m_reactionImpulse.x + jx, m_reactionImpulse.y + jy);
+            }
+            void AddReactionTorque(Real j) noexcept { m_reactionAngularImpulse += j; }
+
+        private:
+            Vec2 m_reactionImpulse{ Real(0), Real(0) }; // linear impulse on B, this step
+            Real m_reactionAngularImpulse = Real(0);    // pure angular impulse on B, this step
+            Real m_reactionDt = Real(0);                // the step the sums cover
         };
 
     } // namespace Physics

@@ -1389,6 +1389,26 @@ namespace Manifold2D
             return raw;
         }
 
+        Vec2 PhysicsWorld::JointReactionForce(const Joint* j) const noexcept
+        {
+            // Pointer membership, as RemoveJoint finds a joint: a removed joint's
+            // stale pointer matches nothing and reads zero.
+            for (const std::unique_ptr<Joint>& owned : m_joints)
+            {
+                if (owned.get() == j && j != nullptr) { return j->ReactionForce(); }
+            }
+            return Vec2(Real(0), Real(0));
+        }
+
+        Real PhysicsWorld::JointReactionTorque(const Joint* j) const noexcept
+        {
+            for (const std::unique_ptr<Joint>& owned : m_joints)
+            {
+                if (owned.get() == j && j != nullptr) { return j->ReactionTorque(); }
+            }
+            return Real(0);
+        }
+
         void PhysicsWorld::RemoveJoint(Joint* j)
         {
             if (j == nullptr)
@@ -2071,6 +2091,9 @@ namespace Manifold2D
                     anyAwakeDynamic = true;
                 }
                 if (!anyAwakeDynamic) { continue; }
+                // Open this step's reaction window (Joint::ReactionForce): the
+                // joint sums what it delivers to B through the solve below.
+                jt->BeginReactionWindow(dt);
                 JointConstraint jc;
                 jc.joint = jt;
                 m_jointConstraints.push_back(jc);

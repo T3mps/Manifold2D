@@ -670,6 +670,15 @@ namespace Manifold2D
             // removeJoint drops it). Ports `#w.joints`.
             [[nodiscard]] std::size_t JointCount() const noexcept { return m_joints.size(); }
 
+            // The force (N, world frame) and torque (N m) joint `j` applied to its
+            // body B over the last step it was solved in (b2Joint_GetConstraintForce
+            // / b2Joint_GetConstraintTorque; the definition is on Joint::
+            // ReactionForce). A breakable joint reads these each step and removes
+            // the joint past its threshold. Zero for a joint this world does not
+            // own (nullptr, removed, or never solved).
+            [[nodiscard]] Vec2 JointReactionForce(const Joint* j) const noexcept;
+            [[nodiscard]] Real JointReactionTorque(const Joint* j) const noexcept;
+
             // ---- step (kinematic subset) -----------------------------------
 
             // Advance the world by dt: prev snapshot + KINEMATIC velocity
