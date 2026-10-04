@@ -32,7 +32,8 @@ check('the scene API is present', () => {
     'addDistanceJoint', 'addRevoluteJoint', 'addWeldJoint', 'addPrismaticJoint', 'addWheelJoint', 'addMotorJoint',
     'addMouseJoint', 'setMouseTarget', 'removeJoint', 'jointCount',
     'setRevoluteReference', 'setRevoluteLimits', 'setRevoluteSpring', 'jointAngle', 'jointReaction', 'castRayClosest', 'setFilterGroup',
-    'setPrismaticLimits', 'jointTranslation', 'addDistanceJointAt', 'setDistanceLimits', 'setDistanceSpring', 'jointLength'];
+    'setPrismaticLimits', 'jointTranslation', 'addDistanceJointAt', 'setDistanceLimits', 'setDistanceSpring', 'jointLength',
+    'bodyAABB'];
   const missing = need.filter((k) => typeof M.ManifoldSim.prototype[k] !== 'function');
   return missing.length === 0 || fail('missing', missing);
 });
@@ -748,6 +749,40 @@ check('distance rope and spring: slack when the ends close in, caught at its len
     && on && near(hang, want, 0.003)
     && bad.every((b) => b === false) && nan.every(Number.isNaN);
   return ok || fail('rope/spring', { slackX, slackV, slackLen, slackF, rodX, rodV, caught, caughtV, on, hang, want, bad, nan });
+});
+
+check('bodyAABB: a rotated box gives its rotated extents, tracking the pose; a dead or bad slot reads NaN', () => {
+  const s = new M.ManifoldSim(0, 4);
+  const a = Math.PI / 6, hw = 0.3, hh = 0.1;
+  const b = s.addBody(DYNAMIC, BOX, 1, 2, a, hw, hh);
+  const v = s.bodyAABB(b);
+  const isView = v instanceof Float32Array && v.length === 4;
+  const box = Array.from(v);
+  const ex = hw * Math.cos(a) + hh * Math.sin(a), ey = hw * Math.sin(a) + hh * Math.cos(a);
+  const want = [1 - ex, 2 - ey, 1 + ex, 2 + ey];
+  s.setTransform(b, -3, 0.5, 0);           // axis-aligned now: exactly the half-extents
+  const moved = Array.from(s.bodyAABB(b));
+  const flat = [-3 - hw, 0.5 - hh, -3 + hw, 0.5 + hh];
+  s.removeBody(b);
+  const dead = Array.from(s.bodyAABB(b)), bad = [...s.bodyAABB(999), ...s.bodyAABB(-1)];
+  s.delete();
+  const ok = isView && box.every((x, i) => near(x, want[i], 1e-5)) && moved.every((x, i) => near(x, flat[i], 1e-5))
+    && dead.length === 4 && dead.every(Number.isNaN) && bad.every(Number.isNaN);
+  return ok || fail('aabb', { isView, box, want, moved, flat, dead, bad });
+});
+
+check('bodyAABB: a two-fixture body (a hull and an offset ball, the drone and its load) bounds both, tight', () => {
+  const s = new M.ManifoldSim(0, 4);
+  const b = s.addBody(DYNAMIC, BOX, 0, 0, 0, 0.1, 0.1);
+  s.addFixture(b, CIRCLE, 1, 0.5, 0, 0.2, 0);
+  const box = Array.from(s.bodyAABB(b));
+  const want = [-0.1, -0.1, 1.2, 0.7];
+  s.setTransform(b, 0, 0, Math.PI / 2);    // the ball swings to local (1, 0.5) rotated: (-0.5, 1)
+  const turned = Array.from(s.bodyAABB(b));
+  const wantTurned = [-0.7, -0.1, 0.1, 1.2];
+  s.delete();
+  const ok = box.every((x, i) => near(x, want[i], 1e-5)) && turned.every((x, i) => near(x, wantTurned[i], 1e-5));
+  return ok || fail('aabb', { box, want, turned, wantTurned });
 });
 
 check('determinism under a gravity well: two identical worlds stay bit-identical', () => {

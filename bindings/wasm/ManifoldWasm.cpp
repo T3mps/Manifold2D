@@ -750,6 +750,28 @@ public:
         return emscripten::val(emscripten::typed_memory_view(m_rayBuf.size(), m_rayBuf.data()));
     }
 
+    // The tight world AABB of body `slot` at its current pose
+    // (b2Body_ComputeAABB): [minX, minY, maxX, maxY], the union of every live
+    // fixture's rotated bounds (round shapes grown by their radius) -- NOT the
+    // fat, margin-grown broadphase box. A drone with a rope-slung load unions
+    // its own box with the load's. NaN x 4 for a dead or invalid slot. A
+    // typed_memory_view: copy before the next call.
+    emscripten::val bodyAABB(int slot)
+    {
+        BodyHandle h;
+        if (!handle(slot, h))
+        {
+            m_aabbBuf.fill(std::numeric_limits<float>::quiet_NaN());
+        }
+        else
+        {
+            const Aabb box = m_world->SlotAabb(h.index);
+            m_aabbBuf = { static_cast<float>(box.min.x), static_cast<float>(box.min.y),
+                          static_cast<float>(box.max.x), static_cast<float>(box.max.y) };
+        }
+        return emscripten::val(emscripten::typed_memory_view(m_aabbBuf.size(), m_aabbBuf.data()));
+    }
+
     // ---- motion helpers ----------------------------------------------------
     void wake(int slot)
     {
@@ -1216,6 +1238,7 @@ private:
     std::vector<Kin>              m_kin;      // kinematic bodies with a binding-advanced angle
     std::vector<float>            m_contactsBuf; // contacts()'s backing store
     std::array<float, 8>          m_rayBuf{};    // castRayClosest()'s backing store
+    std::array<float, 4>          m_aabbBuf{};   // bodyAABB()'s backing store
     std::array<float, 3>          m_reactBuf{};  // jointReaction()'s backing store
 };
 
@@ -1277,6 +1300,7 @@ EMSCRIPTEN_BINDINGS(manifold)
         .function("jointLength",         &ManifoldSim::jointLength)
         .function("jointReaction",       &ManifoldSim::jointReaction)
         .function("castRayClosest",      &ManifoldSim::castRayClosest)
+        .function("bodyAABB",            &ManifoldSim::bodyAABB)
         .function("setFilterGroup",      &ManifoldSim::setFilterGroup)
         .function("setBodyOptions",      &ManifoldSim::setBodyOptions)
         .function("wake",                &ManifoldSim::wake)
