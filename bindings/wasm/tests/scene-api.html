@@ -31,7 +31,8 @@ check('the scene API is present', () => {
     'removeBody', 'isAlive', 'setTransform', 'setVelocity', 'applyImpulse', 'setKinematic',
     'addDistanceJoint', 'addRevoluteJoint', 'addWeldJoint', 'addPrismaticJoint', 'addWheelJoint', 'addMotorJoint',
     'addMouseJoint', 'setMouseTarget', 'removeJoint', 'jointCount',
-    'setRevoluteReference', 'setRevoluteLimits', 'setRevoluteSpring', 'jointAngle', 'jointReaction', 'castRayClosest', 'setFilterGroup'];
+    'setRevoluteReference', 'setRevoluteLimits', 'setRevoluteSpring', 'jointAngle', 'jointReaction', 'castRayClosest', 'setFilterGroup',
+    'setPrismaticLimits', 'jointTranslation'];
   const missing = need.filter((k) => typeof M.ManifoldSim.prototype[k] !== 'function');
   return missing.length === 0 || fail('missing', missing);
 });
@@ -649,6 +650,32 @@ check('jointReaction: a welded hanging box carries m g (up, on the box); a relea
     && near(oy, -cm, 0.03 * cm) && near(ot, -cm * 0.5, 0.03 * cm * 0.5)
     && dead.every(Number.isNaN) && bad.every(Number.isNaN);
   return ok || fail('reaction', { mg, fx, fy, t, cm, oy, ot, dead, bad });
+});
+
+check('prismatic limits: a lift car rests on its lower stop carrying m g; a gate motor stops at its open stop', () => {
+  const s = new M.ManifoldSim(10, 4);
+  s.setFilter(1, 0);                       // only the joints act
+  s.setBodyOptions(0, false, 1);           // sleepThreshold 0: solved every step
+  const shaft = s.addBody(STATIC, CIRCLE, 0, 0, 0, 0.05, 0);
+  const car = s.addBody(DYNAMIC, BOX, 0, 0, 0, 0.5, 0.5);
+  const post = s.addBody(STATIC, CIRCLE, 0, -5, 0, 0.05, 0);
+  const gate = s.addBody(DYNAMIC, BOX, 0, -5, 0, 0.5, 0.25);  // 0.5 kg
+  s.setFilter(1, 0xffffffff);
+  s.setBodyOptions(-1, false, 1);
+  const lift = s.addPrismaticJoint(shaft, car, 0, 1);
+  const slide = s.addPrismaticJoint(post, gate, 1, 0);
+  const set = s.setPrismaticLimits(lift, true, 0.5, -1);   // bounds sorted: [-1, 0.5]; gravity drives the car to +0.5
+  s.setPrismaticLimits(slide, true, -0.25, 2);
+  s.setJointMotor(slide, 3, 100);                         // the gate drives open at 20 g for 5 s (rests ~1.4 mm into the soft stop)
+  run(s, 300);
+  const cy = row(s, car)[1], ct = s.jointTranslation(lift), gx = row(s, gate)[0], gt = s.jointTranslation(slide);
+  const mg = s.mass(car) * 10, [fx, fy] = Array.from(s.jointReaction(lift));
+  const bad = [s.setPrismaticLimits(s.addRevoluteJoint(shaft, car, 0, 0), true, 0, 1), s.setPrismaticLimits(999, true, 0, 1)];
+  const nan = [s.jointTranslation(s.addWeldJoint(post, gate, 0, -5)), s.jointTranslation(999)];
+  s.delete();
+  const ok = set && near(cy, 0.5, 0.005) && near(ct, cy, 1e-5) && near(gx, 2, 0.005) && near(gt, gx, 1e-5)
+    && near(fy, -mg, 0.02 * mg) && near(fx, 0, 0.01 * mg) && bad.every((b) => b === false) && nan.every(Number.isNaN);
+  return ok || fail('prismatic limits', { set, cy, ct, gx, gt, mg, fx, fy, bad, nan });
 });
 
 check('determinism under a gravity well: two identical worlds stay bit-identical', () => {

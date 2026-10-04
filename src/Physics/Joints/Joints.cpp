@@ -315,8 +315,17 @@ namespace Manifold2D
         }
 
         // =================================================================
-        // PrismaticJoint -- PORT of Joints.lua Prismatic (lines 120-151).
+        // PrismaticJoint -- PORT of Joints.lua Prismatic (lines 120-151), plus
+        // Box2D v3 b2PrismaticJoint's motor and translation limit.
         // =================================================================
+
+        Real PrismaticJoint::GetTranslation(const PhysicsWorld& w) const noexcept
+        {
+            // Position() reads (0, 0) for an invalid handle, as JointMath::Pos does
+            const Vec2 pa = w.Position(m_hA);
+            const Vec2 pb = w.Position(m_hB);
+            return (pb.x - pa.x - m_orig.x) * m_axis.x + (pb.y - pa.y - m_orig.y) * m_axis.y;
+        }
 
         void PrismaticJoint::Prepare(PhysicsWorld& w, Real dt)
         {
@@ -345,10 +354,105 @@ namespace Manifold2D
             // The motor acts along the axis through the same origins as the
             // perpendicular constraint, so its effective mass is the same.
             m_maxMotorImpulse = m_maxMotorForce * dt;
+
+            // The limit (b2PreparePrismaticJoint + b2PrepareJoint): the start-of-
+            // step translation, tracked through the sub-steps, and the joint
+            // constraint softness its push-out uses. Its axial mass is m_mass
+            // too (no lever arms: the axis runs through the centres). The
+            // accumulated impulses are kept -- they warm start this step, as
+            // Box2D's do -- unless the limit is off.
+            m_h = dt;
+            m_translation0 = (pb.x - pa.x - m_orig.x) * m_axis.x + (pb.y - pa.y - m_orig.y) * m_axis.y;
+            m_deltaTranslation = Real(0);
+            m_substepping = false;
+            m_pass = 0;
+            const Real constraintHertz = dt > Real(0) ? std::min(kJointConstraintHertz, Real(0.25) / dt) : Real(0);
+            const SoftCoeffs soft = MakeSoft(constraintHertz, kJointConstraintDampingRatio, dt);
+            m_softBiasRate = soft.biasRate; m_softMassScale = soft.massScale; m_softImpulseScale = soft.impulseScale;
+            if (!m_enableLimit) { m_lowerImpulse = m_upperImpulse = Real(0); }
+        }
+
+        void PrismaticJoint::WarmStartLimit(PhysicsWorld& w)
+        {
+            // b2WarmStartPrismaticJoint's limit share: the accumulated
+            // lowerImpulse - upperImpulse along the axis, re-applied in full at
+            // the start of the sub-step (delivered again, so it is reaction too)
+            const Real j = m_lowerImpulse - m_upperImpulse;
+            if (j == Real(0)) { return; }
+            JointMath::ApplyAt(w, m_ia, -m_axis.x * j, -m_axis.y * j, Real(0), Real(0));
+            JointMath::ApplyAt(w, m_ib, m_axis.x * j, m_axis.y * j, Real(0), Real(0));
+            AddReaction(m_axis.x * j, m_axis.y * j);
+        }
+
+        void PrismaticJoint::SolveLimit(PhysicsWorld& w, bool useBias)
+        {
+            // b2SolvePrismaticJoint's limit block: two one-sided constraints on
+            // the current translation, speculative while open (bias C / h), soft
+            // when breached and only on the biased pass, each accumulated
+            // impulse clamped >= 0
+            const Real translation = m_translation0 + m_deltaTranslation;
+            const Real invH = InvDt(m_h);
+            const auto cdot = [&]()
+            {
+                const Vec2 va = JointMath::Vat(w, m_ia, Real(0), Real(0));
+                const Vec2 vb = JointMath::Vat(w, m_ib, Real(0), Real(0));
+                return (vb.x - va.x) * m_axis.x + (vb.y - va.y) * m_axis.y;
+            };
+            const auto apply = [&](Real impulse)
+            {
+                JointMath::ApplyAt(w, m_ia, -m_axis.x * impulse, -m_axis.y * impulse, Real(0), Real(0));
+                JointMath::ApplyAt(w, m_ib, m_axis.x * impulse, m_axis.y * impulse, Real(0), Real(0));
+                AddReaction(m_axis.x * impulse, m_axis.y * impulse);
+            };
+            // lower: C = translation - lower >= 0
+            {
+                const Real C = translation - m_lower;
+                Real bias = Real(0), massScale = Real(1), impulseScale = Real(0);
+                if (C > Real(0)) { bias = C * invH; } // speculation
+                else if (useBias) { bias = m_softBiasRate * C; massScale = m_softMassScale; impulseScale = m_softImpulseScale; }
+                const Real old = m_lowerImpulse;
+                const Real impulse = -massScale * m_mass * (cdot() + bias) - impulseScale * old;
+                m_lowerImpulse = std::max(old + impulse, Real(0));
+                apply(m_lowerImpulse - old);
+            }
+            // upper: C = upper - translation >= 0 (signs flipped to keep C and the impulse positive)
+            {
+                const Real C = m_upper - translation;
+                Real bias = Real(0), massScale = Real(1), impulseScale = Real(0);
+                if (C > Real(0)) { bias = C * invH; }
+                else if (useBias) { bias = m_softBiasRate * C; massScale = m_softMassScale; impulseScale = m_softImpulseScale; }
+                const Real old = m_upperImpulse;
+                const Real impulse = -massScale * m_mass * (-cdot() + bias) - impulseScale * old;
+                m_upperImpulse = std::max(old + impulse, Real(0));
+                apply(-(m_upperImpulse - old));
+            }
         }
 
         void PrismaticJoint::SolveVelocity(PhysicsWorld& w)
         {
+            // Under SoftStep, pass #2 of a sub-step follows the position
+            // integration: take in the slide it just integrated first (as the
+            // revolute joint does its angle). Pass #1 is the biased pass and
+            // warm starts the limit. Without sub-steps (no BeginSubstep) the
+            // limit is a plain sequential impulse over the step's iterations.
+            bool useBias = true;
+            if (m_substepping)
+            {
+                if (m_pass == 1)
+                {
+                    const Vec2 va = JointMath::Vat(w, m_ia, Real(0), Real(0));
+                    const Vec2 vb = JointMath::Vat(w, m_ib, Real(0), Real(0));
+                    m_deltaTranslation += ((vb.x - va.x) * m_axis.x + (vb.y - va.y) * m_axis.y) * m_h;
+                }
+                useBias = m_pass == 0;
+                if (m_pass == 0 && m_enableLimit) { WarmStartLimit(w); }
+                ++m_pass;
+            }
+            else if (m_pass++ == 0)
+            {
+                m_lowerImpulse = m_upperImpulse = Real(0);
+            }
+
             // ---- motor (drive the slide; b2PrismaticJoint's motor) ----------
             // Solved first, like Box2D, so the constraints below have the last
             // word. The accumulated impulse is clamped to maxMotorForce * dt per
@@ -366,6 +470,11 @@ namespace Manifold2D
                 JointMath::ApplyAt(w, m_ib, m_axis.x * impulse, m_axis.y * impulse, Real(0), Real(0));
                 AddReaction(m_axis.x * impulse, m_axis.y * impulse);
             }
+
+            // ---- limit (b2PrismaticJoint's lower/upper translation) ---------
+            // After the motor, as in Box2D: a motor driving into the limit stops
+            // there (the limit has the last word along the axis).
+            if (m_enableLimit && m_mass > Real(0)) { SolveLimit(w, useBias); }
 
             const Vec2 va = JointMath::Vat(w, m_ia, Real(0), Real(0));
             const Vec2 vb = JointMath::Vat(w, m_ib, Real(0), Real(0));
@@ -663,8 +772,11 @@ namespace Manifold2D
                 const Real refAngle =
                     (w.IsValid(def.b) ? w.GetAngle(def.b) : Real(0)) -
                     (w.IsValid(def.a) ? w.GetAngle(def.a) : Real(0));
-                return std::make_unique<PrismaticJoint>(def.a, def.b, axis, orig, refAngle,
-                                                        def.enableMotor, def.motorSpeed, def.maxMotorForce);
+                auto j = std::make_unique<PrismaticJoint>(def.a, def.b, axis, orig, refAngle,
+                                                          def.enableMotor, def.motorSpeed, def.maxMotorForce);
+                j->EnableLimit(def.enableLimit);
+                j->SetLimits(def.lowerTranslation, def.upperTranslation);
+                return j;
             }
             case JointKind::Mouse:
             {

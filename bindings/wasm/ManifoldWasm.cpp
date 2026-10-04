@@ -610,6 +610,32 @@ public:
         const RevoluteJoint* rj = revolute(joint(id));
         return rj != nullptr ? static_cast<float>(rj->JointAngle(*m_world)) : std::numeric_limits<float>::quiet_NaN();
     }
+
+    // ---- prismatic joint (b2PrismaticJoint_*) -------------------------------
+    // The translation is B's slide relative to A along the axis, in metres,
+    // zero at creation (b2PrismaticJoint_GetTranslation).
+    // lower <= translation <= upper (m), or off (b2PrismaticJoint_EnableLimit /
+    // _SetLimits; the bounds are sorted). A motor driven into the limit stops
+    // there. false for any other joint kind or a dead id.
+    bool setPrismaticLimits(int id, bool enable, float lower, float upper)
+    {
+        Joint* j = joint(id);
+        auto* pj = j != nullptr ? dynamic_cast<PrismaticJoint*>(j) : nullptr;
+        if (pj == nullptr) { return false; }
+        pj->EnableLimit(enable);
+        pj->SetLimits(static_cast<Real>(lower), static_cast<Real>(upper));
+        wakeJoint(pj);
+        return true;
+    }
+    // The prismatic joint's current translation (m); NaN for any other joint
+    // or a dead id.
+    float jointTranslation(int id) const
+    {
+        const Joint* j = joint(id);
+        const auto* pj = j != nullptr ? dynamic_cast<const PrismaticJoint*>(j) : nullptr;
+        return pj != nullptr ? static_cast<float>(pj->GetTranslation(*m_world)) : std::numeric_limits<float>::quiet_NaN();
+    }
+
     // What joint `id` carried over the last step (b2Joint_GetConstraintForce /
     // b2Joint_GetConstraintTorque): [fx, fy, torque] -- the force in N, world
     // frame, acting on the joint's body B (the second body passed to add*Joint;
@@ -1178,6 +1204,8 @@ EMSCRIPTEN_BINDINGS(manifold)
         .function("setRevoluteLimits",   &ManifoldSim::setRevoluteLimits)
         .function("setRevoluteSpring",   &ManifoldSim::setRevoluteSpring)
         .function("jointAngle",          &ManifoldSim::jointAngle)
+        .function("setPrismaticLimits",  &ManifoldSim::setPrismaticLimits)
+        .function("jointTranslation",    &ManifoldSim::jointTranslation)
         .function("jointReaction",       &ManifoldSim::jointReaction)
         .function("castRayClosest",      &ManifoldSim::castRayClosest)
         .function("setFilterGroup",      &ManifoldSim::setFilterGroup)

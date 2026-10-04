@@ -75,7 +75,10 @@ namespace Manifold2D
         //   Weld     : anchor (as revolute) + the relative angle is locked to
         //              its value at creation.
         //   Prismatic: axis (world direction; B may only slide along it, with no
-        //              perpendicular drift and no relative rotation).
+        //              perpendicular drift and no relative rotation); Box2D v3
+        //              b2PrismaticJointDef's optional limit (enableLimit,
+        //              lowerTranslation, upperTranslation) and force-limited motor
+        //              (enableMotor, motorSpeed, maxMotorForce).
         //   Mouse    : target + maxForce (body B only; A is kInvalidSlot).
         // NEW:
         //   Wheel    : axis (suspension direction, local to A's frame at
@@ -108,7 +111,8 @@ namespace Manifold2D
             // angle to measure the limits and the spring from the pose at creation.
             Real referenceAngle = Real(0);
             // Revolute limit: lowerAngle <= joint angle <= upperAngle (radians;
-            // Box2D documents a usable range of about +-0.99 pi).
+            // Box2D documents a usable range of about +-0.99 pi). enableLimit also
+            // switches on the Prismatic limit (lower/upperTranslation below).
             bool enableLimit = false;
             Real lowerAngle  = Real(0);
             Real upperAngle  = Real(0);
@@ -119,6 +123,11 @@ namespace Manifold2D
 
             // Prismatic / Wheel: world axis (direction). Normalized at Prepare.
             Vec2 axis{ Real(1), Real(0) };
+            // Prismatic limit (b2PrismaticJointDef), on when enableLimit:
+            // lowerTranslation <= translation <= upperTranslation (m along the
+            // axis; the translation of B relative to A is zero at creation).
+            Real lowerTranslation = Real(0);
+            Real upperTranslation = Real(0);
 
             // Mouse: target + force clamp. Default is an MKS-honest "effectively unclamped"
             // value = Box2D's drag-sample convention 1000*mass*g (samples/sample.cpp:338)

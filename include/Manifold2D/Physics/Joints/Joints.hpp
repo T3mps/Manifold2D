@@ -193,7 +193,29 @@ namespace Manifold2D
         // ================================================================
         // PrismaticJoint -- slide along a fixed world axis: no perpendicular
         // drift, no relative rotation.
-        // PORT: Joints.lua Prismatic (lines 120-151).
+        // PORT: Joints.lua Prismatic (lines 120-151), plus Box2D v3
+        // b2PrismaticJoint's motor and translation limit (prismatic_joint.c
+        // b2SolvePrismaticJoint), solved before the perpendicular and angular
+        // constraints as there:
+        //   * motor: drive B's speed along the axis toward motorSpeed with at
+        //     most maxMotorForce (a fresh h * maxMotorForce budget each sub-step);
+        //   * limit: lower <= translation <= upper, two one-sided constraints,
+        //     each with its own accumulated impulse: speculative while open
+        //     (bias C / h), soft at the joint constraint softness when breached
+        //     (b2PrepareJoint: 60 Hz clamped to 0.25 / h, damping ratio 2), the
+        //     push-out only on the biased pass (useBias), clamped >= 0. Box2D
+        //     warm starts them (b2WarmStartPrismaticJoint): their accumulated
+        //     impulses carry across sub-steps and steps and are re-applied at
+        //     the start of each sub-step (joint pass #1), as the revolute point
+        //     constraint's are.
+        //
+        // Translation (b2PrismaticJoint_GetTranslation, dot(axis, d)): the slide
+        // of B's centre relative to A's along the axis, measured from the pose at
+        // creation -- this joint's "anchors" are the two centres and the origin
+        // offset m_orig, so d = (pB - pA) - m_orig and the translation is zero at
+        // creation. Through a step the joint integrates its own translation from
+        // the velocities the solver integrated (pass #2), as the revolute joint
+        // does its angle.
         // ================================================================
         class PrismaticJoint final : public Joint
         {
@@ -207,26 +229,56 @@ namespace Manifold2D
             }
             void Prepare(PhysicsWorld& w, Real dt) override;
             void SolveVelocity(PhysicsWorld& w) override;
-            // Each sub-step gets the full force budget (see Joint::BeginSubstep).
-            void BeginSubstep() noexcept override { m_motorImpulse = Real(0); }
+            // Each sub-step gets the full motor force budget (see
+            // Joint::BeginSubstep); the limit impulses are kept (warm start).
+            void BeginSubstep() noexcept override
+            {
+                m_substepping = true;
+                m_pass = 0;
+                m_motorImpulse = Real(0);
+            }
 
             // The translation motor (b2PrismaticJoint's): drives B's speed along
             // the axis, relative to A, toward motorSpeed (m/s) with at most
             // maxMotorForce (N). A force-limited motor stalls against a load it
             // cannot move instead of forcing through it -- the safe way to build
-            // a press, a piston or a gate.
+            // a press, a piston or a gate. Driven into an enabled limit, it stops
+            // there.
             void EnableMotor(bool on) noexcept { m_enableMotor = on; }
             void SetMotorSpeed(Real speed) noexcept { m_motorSpeed = speed; }
             void SetMaxMotorForce(Real force) noexcept { m_maxMotorForce = force > Real(0) ? force : Real(0); }
             [[nodiscard]] bool IsMotorEnabled() const noexcept { return m_enableMotor; }
             [[nodiscard]] Real MotorSpeed() const noexcept { return m_motorSpeed; }
             [[nodiscard]] Real MaxMotorForce() const noexcept { return m_maxMotorForce; }
+
+            // ---- Box2D b2PrismaticJoint_* limit controls (take effect from the
+            // next Step; a sleeping body is not woken here: the caller wakes it).
+            // As Box2D's, a change clears the limit's accumulated impulses.
+            void EnableLimit(bool on) noexcept
+            {
+                if (on != m_enableLimit) { m_enableLimit = on; m_lowerImpulse = m_upperImpulse = Real(0); }
+            }
+            void SetLimits(Real lower, Real upper) noexcept
+            {
+                const Real lo = std::min(lower, upper), hi = std::max(lower, upper);
+                if (lo != m_lower || hi != m_upper) { m_lower = lo; m_upper = hi; m_lowerImpulse = m_upperImpulse = Real(0); }
+            }
+            [[nodiscard]] bool IsLimitEnabled() const noexcept { return m_enableLimit; }
+            [[nodiscard]] Real GetLowerLimit() const noexcept { return m_lower; }
+            [[nodiscard]] Real GetUpperLimit() const noexcept { return m_upper; }
+            // The current translation (m) of B relative to A along the axis,
+            // zero at creation (b2PrismaticJoint_GetTranslation).
+            [[nodiscard]] Real GetTranslation(const PhysicsWorld& w) const noexcept;
+
             [[nodiscard]] std::uint32_t BodyA() const noexcept override { return m_ia; }
             [[nodiscard]] std::uint32_t BodyB() const noexcept override { return m_ib; }
             [[nodiscard]] BodyHandle HandleA() const noexcept override { return m_hA; }
             [[nodiscard]] BodyHandle HandleB() const noexcept override { return m_hB; }
 
         private:
+            void WarmStartLimit(PhysicsWorld& w);
+            void SolveLimit(PhysicsWorld& w, bool useBias);
+
             BodyHandle    m_hA, m_hB;
             std::uint32_t m_ia = kInvalidSlot, m_ib = kInvalidSlot;
             Vec2          m_axis{ Real(1), Real(0) }; // normalized slide axis
@@ -244,6 +296,17 @@ namespace Manifold2D
             Real m_maxMotorForce   = Real(0);
             Real m_maxMotorImpulse = Real(0); // maxMotorForce * dt
             Real m_motorImpulse    = Real(0); // accumulated this sub-step
+            // Limit (b2PrismaticJointDef enableLimit / lowerTranslation / upperTranslation).
+            bool m_enableLimit = false;
+            Real m_lower = Real(0), m_upper = Real(0);
+            // Prepared per step / tracked per sub-step.
+            Real m_h = Real(0);                // the (sub-)step the joint is prepared for
+            Real m_translation0 = Real(0);     // the translation at the start of the step
+            Real m_deltaTranslation = Real(0); // its change, integrated through the sub-steps
+            Real m_softBiasRate = Real(0), m_softMassScale = Real(1), m_softImpulseScale = Real(0);
+            Real m_lowerImpulse = Real(0), m_upperImpulse = Real(0); // accumulated (warm-started)
+            bool m_substepping = false;        // the solver calls BeginSubstep (SoftStep)
+            int  m_pass = 0;                   // joint pass within the sub-step
         };
 
         // ================================================================
