@@ -11,8 +11,11 @@ Rules (see docs/ci.md, "Determinism"):
   * every dump must list the same scenes;
   * class "trigfree" scenes must be bit-identical across ALL legs (every OS,
     compiler, configuration and seed);
-  * class "trig" scenes must be bit-identical within each OS (one libm), and are
-    reported -- not failed -- when they differ between OSes.
+  * class "trig" scenes must be bit-identical between legs with the same trig
+    fingerprint (the full set of `probe` hashes: which sin/cos results the
+    leg's binary actually produces); a difference between legs whose
+    fingerprints differ is attributable to the platform's trig and is reported
+    with its magnitude, not failed.
 For any scene that differs the report names the first checkpoint step at which
 the legs part company, and the `probe` libm fingerprints (reported, never
 failed) say whether the legs' float math itself differs.
@@ -118,13 +121,19 @@ def main():
             report.append(f"| {scene} | {cls} | identical on all {len(dumps)} dumps (`{next(iter(by_hash))}`) |")
             continue
 
-        # Within-OS identity is required for every class.
+        # trig: legs that produce identical sin/cos (same probe fingerprint)
+        # must agree; trigfree must agree everywhere (checked below).
         within_os = False
-        for osname, hashes in sorted(by_os_hash.items()):
-            if len(hashes) > 1:
-                within_os = True
-                errors.append(f"{scene} ({cls}): differs WITHIN {osname}: "
-                              + "; ".join(f"{h}: {', '.join(k)}" for h, k in hashes.items()))
+        if cls == "trig":
+            by_fp = defaultdict(lambda: defaultdict(list))
+            for key, (_, s, _, _, p) in dumps.items():
+                if scene in s:
+                    by_fp[tuple(sorted(p.items()))][s[scene][1]].append(key)
+            for fp, hashes in by_fp.items():
+                if len(hashes) > 1:
+                    within_os = True
+                    errors.append(f"{scene} (trig): differs between legs with the SAME trig fingerprint: "
+                                  + "; ".join(f"{h}: {', '.join(sorted(k))}" for h, k in hashes.items()))
 
         # Magnitude of the cross-OS difference, from the final-state hex floats.
         rep = {osname: next(iter(next(iter(h.values())))) for osname, h in by_os_hash.items()}
@@ -141,13 +150,14 @@ def main():
             mags.append("first divergence at step {}: {}".format(
                 step, " vs ".join(", ".join(sorted(k)) for k in groups.values())))
         if within_os:
-            report.append(f"| {scene} | {cls} | **FAIL** differs within one OS: {detail}; {'; '.join(mags)} |")
+            report.append(f"| {scene} | {cls} | **FAIL** differs between legs with the same trig fingerprint: "
+                          f"{detail}; {'; '.join(mags)} |")
         elif cls == "trigfree":
             errors.append(f"{scene} (trigfree) differs across legs: {detail} ({'; '.join(mags)})")
             report.append(f"| {scene} | {cls} | **FAIL** differs: {detail} |")
         else:
-            report.append(f"| {scene} | {cls} | per-OS identical, differs across libms (expected): "
-                          f"{detail}; {'; '.join(mags)} |")
+            report.append(f"| {scene} | {cls} | identical within every trig-fingerprint group; differs "
+                          f"across groups (attributable): {detail}; {'; '.join(mags)} |")
 
     # libm fingerprints: diagnostic, never a failure.
     probe_names = sorted({n for _, _, _, _, p in dumps.values() for n in p})

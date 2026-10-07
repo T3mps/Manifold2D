@@ -13,7 +13,7 @@
 //   scene <name> <class> <hash:016x>
 //   check <name> <step> <hash:016x>          (running hash at step checkpoints)
 //   state <name> <body> <x> <y> <angle>      (final step, %a hex floats)
-//   probe <runtime|folded> <hash:016x>       (libm fingerprint, see below)
+//   probe <name> <hash:016x>                 (trig fingerprint, see below)
 //
 // scripts/compare-determinism.py diffs those files across the CI legs.
 //
@@ -24,11 +24,13 @@
 //               rounded under -ffp-contract=off / /fp:strict. MUST be bit-equal
 //               on every OS, compiler and configuration.
 //   trig     -- free rotation: std::sin/std::cos of non-trivial angles feed
-//               back into the state. Those calls go to the platform libm (MSVC
-//               UCRT, glibc, Apple libm), which C++ does not require to be
-//               correctly rounded, so bits may legitimately differ BETWEEN
-//               libms. MUST be bit-equal across compilers + configs sharing a
-//               libm (all Linux legs; Debug vs Release on one OS).
+//               back into the state. C++ does not require those to be
+//               correctly rounded, and which implementation runs depends on
+//               the platform libm (MSVC UCRT, glibc, Apple libm) and on the
+//               optimizer (e.g. merging sin+cos into one sincos call), so bits
+//               may legitimately differ between legs whose trig fingerprint
+//               (the `probe` lines) differs. MUST be bit-equal between legs
+//               with the same fingerprint.
 //
 // The two `probe` lines fingerprint the platform's float math itself, so a
 // divergence can be attributed instead of guessed at: `runtime` hashes
@@ -37,7 +39,10 @@
 // literals, which the optimizer may evaluate at compile time instead (LLVM folds
 // sinf as double sin + round to float, which can differ from the runtime sinf by
 // an ulp). runtime differing between two legs means different libms; folded
-// differing while runtime matches means one leg constant-folded.
+// differing while runtime matches means one leg constant-folded. The three
+// `*-sweep` probes hash 2^18 angles each (see ProbeSweepSin and friends). The
+// full set of probe hashes is a leg's trig fingerprint: CI requires `trig`
+// scenes to be bit-identical between legs with the same fingerprint.
 //
 // The scenes are test-only consumers of the public API; nothing here changes
 // library behaviour.
@@ -73,7 +78,7 @@ namespace
     // Steps at which the running hash is recorded, so the CI comparison can
     // report the FIRST step at which two legs part company (step 1 = the very
     // first Step's trig / contact math; a later step = accumulation).
-    constexpr int kCheckpoints[] = { 1, 2, 5, 10, 30, 60, 120, 300 };
+    constexpr int kCheckpoints[] = { 1, 2, 5, 10, 20, 30, 35, 40, 45, 50, 55, 59, 60, 61, 90, 120, 180, 240, 300 };
 
     struct SceneResult
     {
@@ -383,6 +388,55 @@ namespace
 
 #undef MANIFOLD2D_PROBE_STEP
 
+    // Dense sweeps over [-8, 8) rad: 2^18 runtime angles. The 12-angle probes
+    // above are a smoke check; these catch the rare inputs on which two libms
+    // round differently. `sin` and `cos` run in separate loops (one call per
+    // argument); `sincos` evaluates both on the same argument back to back,
+    // which an optimizer may merge into one sincos call (on Darwin LLVM emits
+    // __sincosf_stret), a different implementation from separate sinf/cosf.
+    constexpr std::uint32_t kSweepN = 1u << 18;
+
+    float SweepAngle(std::uint32_t i)
+    {
+        static volatile float start = -8.0f;
+        static volatile float span  = 16.0f;
+        return start + span * (static_cast<float>(i) / static_cast<float>(kSweepN));
+    }
+
+    std::uint64_t ProbeSweepSin()
+    {
+        std::uint64_t h = kFnvBasis;
+        for (std::uint32_t i = 0; i < kSweepN; ++i)
+        {
+            FoldBits(h, std::sin(SweepAngle(i)));
+        }
+        return h;
+    }
+
+    std::uint64_t ProbeSweepCos()
+    {
+        std::uint64_t h = kFnvBasis;
+        for (std::uint32_t i = 0; i < kSweepN; ++i)
+        {
+            FoldBits(h, std::cos(SweepAngle(i)));
+        }
+        return h;
+    }
+
+    std::uint64_t ProbeSweepSinCos()
+    {
+        std::uint64_t h = kFnvBasis;
+        for (std::uint32_t i = 0; i < kSweepN; ++i)
+        {
+            const float x = SweepAngle(i);
+            const float s = std::sin(x);
+            const float c = std::cos(x);
+            FoldBits(h, s);
+            FoldBits(h, c);
+        }
+        return h;
+    }
+
     void EmitProbe(const char* name, std::uint64_t h)
     {
         const char* path = std::getenv("MANIFOLD2D_DETERMINISM_OUT");
@@ -404,6 +458,9 @@ TEST_CASE("Cross-platform determinism: libm fingerprint", "[determinism][xplat]"
     // the library's own guarantees are the scene gates below.
     EmitProbe("runtime", ProbeRuntime());
     EmitProbe("folded", ProbeFolded());
+    EmitProbe("sin-sweep", ProbeSweepSin());
+    EmitProbe("cos-sweep", ProbeSweepCos());
+    EmitProbe("sincos-sweep", ProbeSweepSinCos());
     SUCCEED("libm fingerprint emitted");
 }
 
