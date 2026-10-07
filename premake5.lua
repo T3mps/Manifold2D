@@ -27,9 +27,17 @@ workspace "Manifold2D"
 
     filter "system:windows"
         systemversion "latest"
-    filter "system:linux"                    -- Part A SCAFFOLD (exercised in Part B)
-        buildoptions { "-mavx2", "-ffp-contract=off", "-fno-fast-math", "-Wall", "-Wextra" }
+    -- Determinism flags for gcc/clang: never contract a*b+c into an FMA behind
+    -- the source's back (Apple clang defaults to -ffp-contract=on) and never
+    -- fast-math. Explicit fused ops (std::fma, Simd mul_add) stay fused on every
+    -- backend. -mavx2 -mfma is the gcc/clang spelling of MSVC /arch:AVX2 (which
+    -- implies FMA3); Wide_AVX2.inl's mul_add needs both.
+    filter "system:linux"
+        buildoptions { "-mavx2", "-mfma", "-ffp-contract=off", "-fno-fast-math", "-Wall", "-Wextra" }
         links { "pthread" }
+    filter "system:macosx"                   -- Apple Silicon (arm64): NEON backend
+        architecture "ARM64"
+        buildoptions { "-ffp-contract=off", "-fno-fast-math", "-Wall", "-Wextra" }
     filter {}
 
     group "Dependencies"
