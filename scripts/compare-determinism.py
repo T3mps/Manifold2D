@@ -111,7 +111,7 @@ def main():
             for j in range(i + 1, len(names)):
                 a = dumps[rep[names[i]]][2][scene]
                 b = dumps[rep[names[j]]][2][scene]
-                mags.append(f"{names[i]} vs {names[j]}: max |d| = {max_abs_diff(a, b):.3g} m/rad")
+                mags.append(f"{names[i]} vs {names[j]}: max abs diff = {max_abs_diff(a, b):.3g} m/rad")
         detail = "; ".join(f"{o}=`{next(iter(h))}`" for o, h in sorted(by_os_hash.items()))
         if cls == "trigfree":
             errors.append(f"{scene} (trigfree) differs across legs: {detail} ({'; '.join(mags)})")
