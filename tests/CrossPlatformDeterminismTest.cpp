@@ -11,7 +11,9 @@
 // line per scene to it:
 //
 //   scene <name> <class> <hash:016x>
+//   check <name> <step> <hash:016x>          (running hash at step checkpoints)
 //   state <name> <body> <x> <y> <angle>      (final step, %a hex floats)
+//   probe <runtime|folded> <hash:016x>       (libm fingerprint, see below)
 //
 // scripts/compare-determinism.py diffs those files across the CI legs.
 //
@@ -28,6 +30,15 @@
 //               libms. MUST be bit-equal across compilers + configs sharing a
 //               libm (all Linux legs; Debug vs Release on one OS).
 //
+// The two `probe` lines fingerprint the platform's float math itself, so a
+// divergence can be attributed instead of guessed at: `runtime` hashes
+// sin/cos/sqrt of angles the compiler cannot see (read through volatile), i.e.
+// the libm the binary actually calls; `folded` hashes the same values passed as
+// literals, which the optimizer may evaluate at compile time instead (LLVM folds
+// sinf as double sin + round to float, which can differ from the runtime sinf by
+// an ulp). runtime differing between two legs means different libms; folded
+// differing while runtime matches means one leg constant-folded.
+//
 // The scenes are test-only consumers of the public API; nothing here changes
 // library behaviour.
 
@@ -35,7 +46,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -55,10 +68,18 @@ namespace
     constexpr Real kDt    = Real(1) / Real(60);
     constexpr int  kSteps = 300;
 
+    constexpr std::uint64_t kFnvBasis = 0xcbf29ce484222325ull;
+
+    // Steps at which the running hash is recorded, so the CI comparison can
+    // report the FIRST step at which two legs part company (step 1 = the very
+    // first Step's trig / contact math; a later step = accumulation).
+    constexpr int kCheckpoints[] = { 1, 2, 5, 10, 30, 60, 120, 300 };
+
     struct SceneResult
     {
-        std::uint64_t     hash = 0xcbf29ce484222325ull; // FNV-1a offset basis
-        std::vector<Real> finalState;                   // x, y, angle per body
+        std::uint64_t     hash = kFnvBasis;              // FNV-1a offset basis
+        std::vector<Real> finalState;                    // x, y, angle per body
+        std::vector<std::pair<int, std::uint64_t>> checkpoints;
     };
 
     void FoldBits(std::uint64_t& h, Real v)
@@ -91,6 +112,17 @@ namespace
                 r.finalState.push_back(p.x);
                 r.finalState.push_back(p.y);
                 r.finalState.push_back(a);
+            }
+        }
+    }
+
+    void Checkpoint(SceneResult& r, int step)
+    {
+        for (int c : kCheckpoints)
+        {
+            if (c == step)
+            {
+                r.checkpoints.emplace_back(step, r.hash);
             }
         }
     }
@@ -161,6 +193,7 @@ namespace
             }
             w.Step(kDt);
             Record(w, bodies, r, step == kSteps);
+            Checkpoint(r, step);
         }
         return r;
     }
@@ -272,6 +305,7 @@ namespace
             }
             w.Step(kDt);
             Record(w, bodies, r, step == kSteps);
+            Checkpoint(r, step);
         }
         return r;
     }
@@ -286,6 +320,10 @@ namespace
         std::FILE* f = std::fopen(path, "a");
         REQUIRE(f != nullptr);
         std::fprintf(f, "scene %s %s %016llx\n", name, cls, static_cast<unsigned long long>(r.hash));
+        for (const auto& [step, h] : r.checkpoints)
+        {
+            std::fprintf(f, "check %s %d %016llx\n", name, step, static_cast<unsigned long long>(h));
+        }
         for (std::size_t i = 0; i + 2 < r.finalState.size(); i += 3)
         {
             std::fprintf(f, "state %s %zu %a %a %a\n", name, i / 3,
@@ -295,6 +333,78 @@ namespace
         }
         std::fclose(f);
     }
+}
+
+namespace
+{
+    // One probe step: sin, cos and sqrt of `a`, folded into h.
+#define MANIFOLD2D_PROBE_STEP(h, a)                 \
+    do {                                            \
+        FoldBits((h), std::sin(static_cast<Real>(a)));  \
+        FoldBits((h), std::cos(static_cast<Real>(a)));  \
+        FoldBits((h), std::sqrt(std::fabs(static_cast<Real>(a)))); \
+    } while (false)
+
+    // Angles read through volatile: the compiler cannot see the values, so these
+    // are genuine calls into the platform libm.
+    std::uint64_t ProbeRuntime()
+    {
+        static volatile float angles[] = {
+            0.3f, 0.6f, 0.9f, 1.2f, 1.5f, 2.0f, 2.5f, 3.0f, -0.7f, 12.5f, 100.25f, 1000.5f,
+        };
+        std::uint64_t h = kFnvBasis;
+        for (volatile float& a : angles)
+        {
+            const float v = a;
+            MANIFOLD2D_PROBE_STEP(h, v);
+        }
+        return h;
+    }
+
+    // The same values as literals: the optimizer is free to evaluate these at
+    // compile time rather than calling libm.
+    std::uint64_t ProbeFolded()
+    {
+        std::uint64_t h = kFnvBasis;
+        MANIFOLD2D_PROBE_STEP(h, 0.3f);
+        MANIFOLD2D_PROBE_STEP(h, 0.6f);
+        MANIFOLD2D_PROBE_STEP(h, 0.9f);
+        MANIFOLD2D_PROBE_STEP(h, 1.2f);
+        MANIFOLD2D_PROBE_STEP(h, 1.5f);
+        MANIFOLD2D_PROBE_STEP(h, 2.0f);
+        MANIFOLD2D_PROBE_STEP(h, 2.5f);
+        MANIFOLD2D_PROBE_STEP(h, 3.0f);
+        MANIFOLD2D_PROBE_STEP(h, -0.7f);
+        MANIFOLD2D_PROBE_STEP(h, 12.5f);
+        MANIFOLD2D_PROBE_STEP(h, 100.25f);
+        MANIFOLD2D_PROBE_STEP(h, 1000.5f);
+        return h;
+    }
+
+#undef MANIFOLD2D_PROBE_STEP
+
+    void EmitProbe(const char* name, std::uint64_t h)
+    {
+        const char* path = std::getenv("MANIFOLD2D_DETERMINISM_OUT");
+        if (path == nullptr || *path == '\0')
+        {
+            return;
+        }
+        std::FILE* f = std::fopen(path, "a");
+        REQUIRE(f != nullptr);
+        std::fprintf(f, "probe %s %016llx\n", name, static_cast<unsigned long long>(h));
+        std::fclose(f);
+    }
+}
+
+TEST_CASE("Cross-platform determinism: libm fingerprint", "[determinism][xplat]")
+{
+    // Diagnostic only: these hashes attribute a scene divergence to the libm or
+    // to compile-time folding. A difference is reported by CI, never failed --
+    // the library's own guarantees are the scene gates below.
+    EmitProbe("runtime", ProbeRuntime());
+    EmitProbe("folded", ProbeFolded());
+    SUCCEED("libm fingerprint emitted");
 }
 
 TEST_CASE("Cross-platform determinism: trig-free pile (all broadphases, serial + MT)", "[determinism][xplat]")

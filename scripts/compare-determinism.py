@@ -13,6 +13,9 @@ Rules (see docs/ci.md, "Determinism"):
     compiler, configuration and seed);
   * class "trig" scenes must be bit-identical within each OS (one libm), and are
     reported -- not failed -- when they differ between OSes.
+For any scene that differs the report names the first checkpoint step at which
+the legs part company, and the `probe` libm fingerprints (reported, never
+failed) say whether the legs' float math itself differs.
 Exit status 1 on any rule violation, 0 otherwise. Writes a Markdown report to
 $GITHUB_STEP_SUMMARY when that variable is set.
 """
@@ -26,6 +29,8 @@ from collections import defaultdict
 def parse(path):
     scenes = {}
     states = defaultdict(list)
+    checks = defaultdict(dict)
+    probes = {}
     with open(path, encoding="ascii") as f:
         for line in f:
             parts = line.split()
@@ -35,9 +40,13 @@ def parse(path):
                 scenes[parts[1]] = (parts[2], parts[3])
             elif parts[0] == "state" and len(parts) == 6:
                 states[parts[1]].append(tuple(float.fromhex(v) for v in parts[3:]))
+            elif parts[0] == "check" and len(parts) == 4:
+                checks[parts[1]][int(parts[2])] = parts[3]
+            elif parts[0] == "probe" and len(parts) == 3:
+                probes[parts[1]] = parts[2]
             else:
                 raise ValueError(f"{path}: malformed line: {line.rstrip()}")
-    return scenes, states
+    return scenes, states, checks, probes
 
 
 def max_abs_diff(a, b):
@@ -46,6 +55,19 @@ def max_abs_diff(a, b):
         for va, vb in zip(ra, rb):
             worst = max(worst, abs(va - vb))
     return worst
+
+
+def first_divergence(dumps, scene):
+    """Earliest checkpoint step at which the legs disagree, with the groups."""
+    steps = sorted({s for _, _, _, c, _ in dumps.values() for s in c.get(scene, {})})
+    for step in steps:
+        groups = defaultdict(list)
+        for key, (_, _, _, c, _) in dumps.items():
+            if step in c.get(scene, {}):
+                groups[c[scene][step]].append(key)
+        if len(groups) > 1:
+            return step, groups
+    return None, None
 
 
 def main():
@@ -63,8 +85,7 @@ def main():
         for name in sorted(os.listdir(leg_dir)):
             if name.startswith("determinism-") and name.endswith(".txt"):
                 legs.add(leg)
-                scenes, states = parse(os.path.join(leg_dir, name))
-                dumps[f"{leg}/{name}"] = (leg.split("-", 1)[0], scenes, states)
+                dumps[f"{leg}/{name}"] = (leg.split("-", 1)[0],) + parse(os.path.join(leg_dir, name))
 
     errors = []
     report = ["## Cross-platform determinism", ""]
@@ -73,7 +94,7 @@ def main():
     if not dumps:
         errors.append("no determinism dumps found")
 
-    scene_sets = {frozenset(s) for _, s, _ in dumps.values()}
+    scene_sets = {frozenset(s) for _, s, _, _, _ in dumps.values()}
     if len(scene_sets) > 1:
         errors.append(f"dumps disagree on the scene list: {[sorted(s) for s in scene_sets]}")
     all_scenes = sorted(set().union(*scene_sets)) if scene_sets else []
@@ -81,14 +102,14 @@ def main():
     report.append("| scene | class | result |")
     report.append("|---|---|---|")
     for scene in all_scenes:
-        classes = {s[scene][0] for _, s, _ in dumps.values() if scene in s}
+        classes = {s[scene][0] for _, s, _, _, _ in dumps.values() if scene in s}
         cls = classes.pop() if len(classes) == 1 else "?"
         if cls == "?":
             errors.append(f"{scene}: inconsistent class across dumps")
             continue
         by_hash = defaultdict(list)
         by_os_hash = defaultdict(lambda: defaultdict(list))
-        for key, (osname, s, _) in dumps.items():
+        for key, (osname, s, _, _, _) in dumps.items():
             if scene in s:
                 by_hash[s[scene][1]].append(key)
                 by_os_hash[osname][s[scene][1]].append(key)
@@ -98,8 +119,10 @@ def main():
             continue
 
         # Within-OS identity is required for every class.
+        within_os = False
         for osname, hashes in sorted(by_os_hash.items()):
             if len(hashes) > 1:
+                within_os = True
                 errors.append(f"{scene} ({cls}): differs WITHIN {osname}: "
                               + "; ".join(f"{h}: {', '.join(k)}" for h, k in hashes.items()))
 
@@ -113,12 +136,33 @@ def main():
                 b = dumps[rep[names[j]]][2][scene]
                 mags.append(f"{names[i]} vs {names[j]}: max abs diff = {max_abs_diff(a, b):.3g} m/rad")
         detail = "; ".join(f"{o}=`{next(iter(h))}`" for o, h in sorted(by_os_hash.items()))
-        if cls == "trigfree":
+        step, groups = first_divergence(dumps, scene)
+        if step is not None:
+            mags.append("first divergence at step {}: {}".format(
+                step, " vs ".join(", ".join(sorted(k)) for k in groups.values())))
+        if within_os:
+            report.append(f"| {scene} | {cls} | **FAIL** differs within one OS: {detail}; {'; '.join(mags)} |")
+        elif cls == "trigfree":
             errors.append(f"{scene} (trigfree) differs across legs: {detail} ({'; '.join(mags)})")
             report.append(f"| {scene} | {cls} | **FAIL** differs: {detail} |")
         else:
             report.append(f"| {scene} | {cls} | per-OS identical, differs across libms (expected): "
                           f"{detail}; {'; '.join(mags)} |")
+
+    # libm fingerprints: diagnostic, never a failure.
+    probe_names = sorted({n for _, _, _, _, p in dumps.values() for n in p})
+    if probe_names:
+        report += ["", "| libm probe | groups |", "|---|---|"]
+        for name in probe_names:
+            groups = defaultdict(list)
+            for key, (_, _, _, _, p) in dumps.items():
+                if name in p:
+                    groups[p[name]].append(key)
+            if len(groups) == 1:
+                report.append(f"| {name} | identical everywhere (`{next(iter(groups))}`) |")
+            else:
+                report.append("| {} | {} |".format(name, " / ".join(
+                    f"`{h}`: {', '.join(sorted(k))}" for h, k in sorted(groups.items()))))
 
     report.append("")
     report.append(f"Legs: {', '.join(sorted(legs))}")
