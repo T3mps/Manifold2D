@@ -48,19 +48,22 @@ Manifold2D is authored in **MKS** (meters / kilograms / seconds). Bodies are
 0.1--10 m, default gravity is `(0, 10)` (y-down), velocities are m/s. Never
 author pixel-scale content; map world -> screen at the display layer.
 
-## Build + test (Windows)
+## Build + test
 
-```bat
-scripts\generate_vs2022.bat                            :: premake5 vs2022 -> Manifold2D.sln
-msbuild Manifold2D.sln /p:Configuration=Release /m
-bin\Release-windows-x86_64\Manifold2DTests\Manifold2DTests.exe
+```bash
+scripts/build.sh Release && scripts/run-tests.sh Release --rng-seed 1      # Linux / macOS
 ```
 
-Configurations: `Debug` / `Release` / `Dist`. The build is self-contained --
-the vendored `premake5.exe` and test deps mean no other repo is required.
+```powershell
+scripts/build.ps1 Release; scripts/run-tests.ps1 Release --rng-seed 1      # Windows
+```
 
-Linux (`scripts/generate_linux.sh` -> `gmake2`) is scaffolded but not yet
-green; the cross-platform burn-down is a follow-up.
+Configurations: `Debug` / `Release` / `Dist`. Windows uses the vendored
+`premake5.exe` and the newest Visual Studio; Linux / macOS fetch the same
+premake version (SHA-256 pinned) and build with `gmake`. CI covers Windows
+(MSVC), Linux (GCC 14, Clang 19) and macOS (Apple Clang, arm64) and diffs a
+cross-platform determinism fixture across all of them -- see
+[docs/ci.md](docs/ci.md).
 
 ## License
 
