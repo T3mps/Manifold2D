@@ -131,20 +131,42 @@ its own sin/cos (a behaviour change, out of scope for CI work).
 
 ### Measured verdict
 
-Measured on the PR that introduced this check (8 legs x 2 seeds = 16 dumps):
+Measured on the PR that introduced this check (8 legs x 2 seeds = 16 dumps;
+run `37642750370`):
 
-- `trigfree` (`pile-tree`, `pile-hash`, `pile-sap`): **bit-identical on all
-  16 dumps** -- Windows/MSVC, Linux/GCC 14, Linux/Clang 19, macOS/Apple Clang
-  arm64, Debug and Release, both seeds -- and identical across the three
-  broadphases (`20539a820ac0dc3c`).
-- `rotating-mixed` (`trig`): bit-identical on all 16 dumps through step 30.
-  By step 60 it splits into {all Linux legs, macOS Debug} and {all Windows
-  legs, macOS Release}; the final states differ by up to ~1e-3 m (Linux vs
-  macOS) and ~0.73 m (vs Windows) after 300 steps. The 12-angle probes are
-  identical everywhere, which is why the dense sweeps were added; the job
-  summary of the latest run attributes each group to its fingerprint.
-- Every leg is identical across its two seeds, and GCC 14 == Clang 19 on
-  every scene.
+- **`trigfree` -- identical everywhere.** `pile-tree`, `pile-hash`,
+  `pile-sap` are bit-identical on all 16 dumps -- Windows/MSVC, Linux/GCC 14,
+  Linux/Clang 19, macOS/Apple Clang arm64 (NEON), Debug and Release, both
+  seeds -- and identical across the three broadphases (`20539a820ac0dc3c`).
+  The contact solver, broadphases, islands, AVX2 vs NEON SIMD paths and the
+  4-worker MT path all produce the same bits on every platform.
+- **`trig` -- identical within every fingerprint group; the groups are fully
+  explained by the platform's sin/cos.** The trig fingerprint forms 4 groups:
+
+  | Group | Legs | Cause |
+  |---|---|---|
+  | glibc | all 4 Linux legs (GCC 14 + Clang 19, Debug + Release) | -- |
+  | UCRT | both Windows legs | `sin-sweep`, `cos-sweep` differ from glibc: MSVC UCRT `sinf`/`cosf` round some inputs differently |
+  | Apple libm, -O0 | macOS Debug | `sin-sweep`, `cos-sweep` differ from glibc and UCRT |
+  | Apple libm, -O3 | macOS Release | as above, **and** `sincos-sweep` differs from macOS Debug: at -O3 Apple Clang merges `sin(x)`+`cos(x)` on the same argument into one sincos call, which rounds differently from separate `sinf`/`cosf` |
+
+  `rotating-mixed` is bit-identical within each group (so GCC == Clang, and
+  Debug == Release wherever the fingerprint says the trig is the same). Every
+  leg's state is bit-identical through step 35; the groups part company
+  between steps 36 and 40 and after 300 steps differ by up to 1.1e-3 m
+  (glibc vs Apple libm) and 0.73 m (vs UCRT). The 12-angle `runtime`/`folded`
+  probes are identical everywhere: the differences are rare 1-ulp cases, and
+  compile-time folding is not a factor on these legs.
+- **Seeds:** every leg is identical across its two seeds (the scenes use no
+  randomness; the property tests do, and pass on both).
+
+**What this means for users:** rotation-free simulation replays bit-exactly
+across all supported platforms and build configurations. Simulations with
+free rotation replay bit-exactly on one platform + config, and across
+compilers sharing a libm, but not across OSes -- and on macOS not between
+Debug and Release builds. A consumer that needs cross-platform lockstep with
+rotation needs a library-provided deterministic sin/cos (follow-up; out of
+scope here because it changes behaviour).
 
 ## Supply chain
 
