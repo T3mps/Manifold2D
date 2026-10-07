@@ -91,33 +91,60 @@ harness, the solver/broadphase/narrowphase MT-invariance suites) assert
 run-twice and serial-vs-MT identity **inside one binary**, so they pass on any
 platform by construction and say nothing about cross-platform identity.
 
-`tests/CrossPlatformDeterminismTest.cpp` adds that: it steps fixed scenes and
+`tests/CrossPlatformDeterminismTest.cpp` adds that. It steps fixed scenes and
 folds every body's raw float bits (position, angle, linear + angular velocity)
-into an FNV-1a hash per step, asserts the in-process identities, and appends
-`scene <name> <class> <hash>` (+ final states as hex floats) to
-`$MANIFOLD2D_DETERMINISM_OUT`. The CI job then requires:
+into an FNV-1a hash per step, asserts the in-process identities, and writes to
+`$MANIFOLD2D_DETERMINISM_OUT`:
 
-| Class      | Scenes                                   | Requirement |
-|------------|------------------------------------------|-------------|
-| `trigfree` | `pile-tree`, `pile-hash`, `pile-sap`     | bit-identical on **all** legs: every OS, compiler, config, seed |
-| `trig`     | `rotating-mixed`                         | bit-identical **within each OS**; a difference **between** OSes is reported with its magnitude but does not fail |
+- `scene <name> <class> <hash>` -- the final hash;
+- `check <name> <step> <hash>` -- the running hash at checkpoint steps, so a
+  divergence is pinned to the first step where legs part company;
+- `state ...` -- final positions/angles as hex floats (gives the magnitude);
+- `probe <name> <hash>` -- the leg's **trig fingerprint**: `sin`/`cos`/`sqrt`
+  of 12 angles read through `volatile` (`runtime`) and as literals the
+  optimizer may fold (`folded`), plus 2^18-angle sweeps of `sin`, of `cos`,
+  and of `sin`+`cos` on the same argument (`sincos-sweep`; an optimizer may
+  merge that pair into one sincos call, e.g. Darwin's `__sincosf_stret`).
+
+`scripts/compare-determinism.py` (the `cross-platform-determinism` job)
+enforces:
+
+| Class      | Scenes                               | Requirement |
+|------------|--------------------------------------|-------------|
+| `trigfree` | `pile-tree`, `pile-hash`, `pile-sap` | bit-identical on **every** leg: OS, compiler, config, seed |
+| `trig`     | `rotating-mixed`                     | bit-identical between legs with the **same trig fingerprint**; a difference between legs whose fingerprints differ is reported with its magnitude and first diverging step, not failed |
 
 Why the split: the `trigfree` scenes use only fixedRotation bodies, so the
 only transcendentals evaluated are `sin/cos(0)` (exact everywhere); the rest
-is IEEE-754 `+ - * / sqrt` and explicit `fma`, which are correctly rounded and
--- with contraction and fast-math banned -- identical on MSVC, GCC, Clang and
-Apple Clang, AVX2 and NEON. Free rotation calls `std::sin`/`std::cos` on
-arbitrary angles (`PhysicsTypes.hpp`, `PhysicsWorld.cpp`, `Joints.cpp`,
-narrowphase transforms). Those go to the platform libm (MSVC UCRT, glibc,
-Apple libm), which C++ does not require to be correctly rounded, so the last
-bit can differ between OSes and the soft-step solver amplifies it. All Linux
-legs share glibc, so GCC and Clang must still agree exactly. Making rotating
-scenes bit-identical across OSes would need the library to ship its own
-sin/cos (a behaviour change, out of scope for CI work).
+is IEEE-754 `+ - * / sqrt` and explicit `fma`, correctly rounded and -- with
+contraction and fast-math banned -- identical on MSVC, GCC, Clang and Apple
+Clang, AVX2 and NEON. Free rotation feeds `std::sin`/`std::cos` of arbitrary
+angles back into the state (`PhysicsTypes.hpp`, `PhysicsWorld.cpp`,
+`Joints.cpp`, narrowphase transforms). C++ does not require those to be
+correctly rounded, and *which* implementation runs depends on the platform
+libm and on the optimizer, so a 1-ulp difference is legitimate between legs
+whose fingerprint differs -- and the soft-step solver amplifies it. Legs whose
+fingerprint is identical evaluate identical trig on every sampled input, so
+any divergence between them is a real determinism bug and fails the job.
+Making rotating scenes bit-identical everywhere would need the library to ship
+its own sin/cos (a behaviour change, out of scope for CI work).
 
-Measured results: see the latest `cross-platform-determinism` job summary;
-the verdict at the time of introduction is recorded in the PR that added this
-file.
+### Measured verdict
+
+Measured on the PR that introduced this check (8 legs x 2 seeds = 16 dumps):
+
+- `trigfree` (`pile-tree`, `pile-hash`, `pile-sap`): **bit-identical on all
+  16 dumps** -- Windows/MSVC, Linux/GCC 14, Linux/Clang 19, macOS/Apple Clang
+  arm64, Debug and Release, both seeds -- and identical across the three
+  broadphases (`20539a820ac0dc3c`).
+- `rotating-mixed` (`trig`): bit-identical on all 16 dumps through step 30.
+  By step 60 it splits into {all Linux legs, macOS Debug} and {all Windows
+  legs, macOS Release}; the final states differ by up to ~1e-3 m (Linux vs
+  macOS) and ~0.73 m (vs Windows) after 300 steps. The 12-angle probes are
+  identical everywhere, which is why the dense sweeps were added; the job
+  summary of the latest run attributes each group to its fingerprint.
+- Every leg is identical across its two seeds, and GCC 14 == Clang 19 on
+  every scene.
 
 ## Supply chain
 
@@ -160,9 +187,10 @@ From the shared standard, with reasons:
 1. **Extra job `cross-platform-determinism`.** The standard is one matrix; the
    determinism diff needs every leg's output, so it is a dependent job in the
    same workflow (still one `ci.yml`).
-2. **`trig` scenes are not required to match across OSes** -- libm `sin/cos`
-   differ (see [Determinism](#determinism)); they are required to match
-   within an OS and the cross-OS delta is reported.
+2. **`trig` scenes are gated on the trig fingerprint, not on "all legs"** --
+   platform `sin/cos` may differ by an ulp (see [Determinism](#determinism));
+   they must match between legs with the same fingerprint, and any other
+   difference is reported with its magnitude and first diverging step.
 3. **Windows generator is chosen at run time** (`vs2022` or `vs2026`) to honour
    "newest VS on the image" without editing the workflow when the image moves.
 4. **`Dist` not in the matrix** -- identical code generation to `Release` minus
