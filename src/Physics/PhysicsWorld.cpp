@@ -3171,10 +3171,36 @@ namespace Manifold2D
 
         // ---- pull API for debug draw / inspection (P3.6) -------------------
 
+        void PhysicsWorld::GetBodyContacts(BodyHandle h, std::vector<BodyContact>& out) const
+        {
+            out.clear();
+            if (!IsValid(h)) return;
+            // Touching solver contacts of this body, ascending pool id. Sleeping
+            // bodies keep their pool contacts (ConstraintGraph.cpp UpdateOneContact
+            // BothAsleep return, :591-596), so they are listed too. The stored
+            // manifold normal points B -> A (Manifold.hpp:74; per-point :33).
+            m_graph.ForEachPoolContact([&](std::uint32_t, const Contact& c)
+            {
+                if (!c.solverRelevant || !c.bIsBody || !c.touching) return;
+                const Vec2 n = c.manifold.normal;
+                if (c.bodyA == h.index && c.genA == h.generation)
+                    out.push_back(BodyContact{ c.a, c.b, h, BodyHandle{ c.bodyB, c.genB },
+                                               Vec2(-n.x, -n.y), c.manifold.pointCount });
+                else if (c.bodyB == h.index && c.genB == h.generation)
+                    out.push_back(BodyContact{ c.b, c.a, h, BodyHandle{ c.bodyA, c.genA },
+                                               n, c.manifold.pointCount });
+            });
+        }
+
         void PhysicsWorld::ForEachContact(
             Mosaic::FunctionRef<void(std::uint32_t, std::uint32_t)> fn) const
         {
-            m_contacts.ForEachBegunPair(fn);
+            // Every touching body-to-body pool contact, ascending id (spec s6.5).
+            // Replaces the ContactManager begun-pair walk; includes dyn-static now.
+            m_graph.ForEachPoolContact([&](std::uint32_t, const Contact& c)
+            {
+                if (c.bIsBody && c.touching && c.bodyB != kInvalidSlot) fn(c.bodyA, c.bodyB);
+            });
         }
 
 

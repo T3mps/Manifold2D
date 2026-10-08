@@ -174,6 +174,13 @@ namespace Manifold2D
             // non-const pool stays private to the graph.
             [[nodiscard]] const ContactPool& Pool() const noexcept { return m_contactPool; }
 
+            // Live pool contacts in ascending id (ContactPool::ForEach). Read-only.
+            // GetBodyContacts and ForEachContact filter; this accessor does not.
+            void ForEachPoolContact(Mosaic::FunctionRef<void(std::uint32_t, const Contact&)> fn) const
+            {
+                m_contactPool.ForEach(fn);
+            }
+
             // The live pool contact for `id`. ContactPool::Get asserts the id is alive.
             // Stage 6b resolves a solver constraint's sourceContactId through this.
             [[nodiscard]] const Contact& PoolContact(std::uint32_t id) const;

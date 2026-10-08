@@ -636,6 +636,13 @@ namespace Manifold2D
             // the next Step.
             [[nodiscard]] SensorEvents GetSensorEvents() const noexcept;
 
+            // Touching solver contacts of this body, ascending pool id, including a
+            // sleeper's persistent contact (b2Body_GetContactData, Box2D body.c:460-499;
+            // touching is body.c:480). Sleepers stay in the pool and drop out of the
+            // solver feed. `out` is cleared first; an invalid handle leaves it empty.
+            // normal points from self outward to the other body.
+            void GetBodyContacts(BodyHandle h, std::vector<BodyContact>& out) const;
+
             // Test seam: the pool contact's eventFlags, or 0xFF when no contact exists.
             [[nodiscard]] std::uint8_t DebugContactEventFlags(FixtureHandle a, FixtureHandle b) const;
 
@@ -1100,10 +1107,11 @@ namespace Manifold2D
             // Core.  Both forward to Core-internal members without exposing raw
             // vectors to general callers.
 
-            // Visit each contact pair in the begun state (begun == true) from
-            // the LAST Step, passing the two body SLOT indices.  Read-only;
-            // unordered iteration (unordered_map traversal -- acceptable for a
-            // debug overlay).  Forwards to ContactManager::ForEachBegunPair.
+            // Every touching body-to-body pool contact, ascending id (spec s6.5).
+            // Passes the two body SLOT indices. Read-only. Includes
+            // dynamic-vs-static. Replaces the ContactManager begun-pair walk;
+            // ContactManager itself stays. Signature unchanged: Arcane's
+            // PhysicsDebugDraw calls this with (slotA, slotB).
             void ForEachContact(
                 Mosaic::FunctionRef<void(std::uint32_t a,
                                  std::uint32_t b)> fn) const;
