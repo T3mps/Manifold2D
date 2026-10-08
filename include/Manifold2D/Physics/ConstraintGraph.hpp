@@ -174,6 +174,10 @@ namespace Manifold2D
             // non-const pool stays private to the graph.
             [[nodiscard]] const ContactPool& Pool() const noexcept { return m_contactPool; }
 
+            // The live pool contact for `id`. ContactPool::Get asserts the id is alive.
+            // Stage 6b resolves a solver constraint's sourceContactId through this.
+            [[nodiscard]] const Contact& PoolContact(std::uint32_t id) const;
+
             // Live pooled-contact count (test/inspection hook backing).
             [[nodiscard]] std::size_t DebugContactCount() const noexcept
             {

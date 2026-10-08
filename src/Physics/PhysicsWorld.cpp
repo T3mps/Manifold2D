@@ -2436,10 +2436,57 @@ namespace Manifold2D
             }
 
             // ---- stage 6b: event arrays (spec 2026-10-08 s6) -----------------
-            // Sort for determinism (s6.3), then flip the end buffers exactly as
-            // Box2D world.c:807-810: the buffer this step wrote becomes readable,
-            // the other is cleared for the next step and for destroys before it.
+            // Hits first, then sort for determinism (s6.3), then flip the end
+            // buffers exactly as Box2D world.c:807-810: the buffer this step wrote
+            // becomes readable, the other is cleared for the next step and for
+            // destroys before it.
             {
+                // Hits (Box2D solver.c:1758-1814): per solver contact that opted in,
+                // the point with the largest approach speed above the threshold among
+                // points that took normal impulse. Approach speed is
+                // -ContactConstraintPoint::relativeVelocity, captured at Prepare
+                // (SoftStep.cpp:270-274). Box2D copies that field onto the manifold
+                // point as normalVelocity (contact_solver.c:502, :2097-2115) and the
+                // hit loop reads -normalVelocity; Manifold2D does not store it, so
+                // the constraint point is read directly. The impulse test is the
+                // post-solve ManifoldPoint::normalImpulse > 0 -- there is no
+                // totalNormalImpulse (spec amendment A4). Emit binds
+                // `const Manifold& m = c.manifold` on the pool contact
+                // (ConstraintGraph.cpp:1192) and copies manifold point p into
+                // constraint point p (ConstraintGraph.cpp:1243-1261).
+                // WritebackImpulses writes the impulse back by that same index
+                // (ConstraintGraph.cpp:1378-1383), so p indexes both. Gated on
+                // m_eventsEnabled at push time; hits are not begin/end pairs (R10).
+                if (m_eventsEnabled)
+                {
+                    for (const ContactConstraint& cc : m_contactConstraints)
+                    {
+                        if (cc.sourceContactId == ContactConstraint::kNoContact) continue; // tile span
+                        const Contact& c = m_graph.PoolContact(cc.sourceContactId);
+                        if ((c.eventFlags & kEvHit) == 0u) continue;
+                        Real best = m_hitEventThreshold;
+                        int  bestP = -1;
+                        for (int p = 0; p < cc.pointCount; ++p)
+                        {
+                            const Real approach = -cc.points[p].relativeVelocity;
+                            if (approach > best && c.manifold.points[p].normalImpulse > Real(0))
+                            {
+                                best = approach;
+                                bestP = p;
+                            }
+                        }
+                        if (bestP < 0) continue;
+                        ContactHitEvent e;
+                        e.a = c.a; e.b = c.b;
+                        e.bodyA = BodyHandle{ c.bodyA, c.genA };
+                        e.bodyB = BodyHandle{ c.bodyB, c.genB };
+                        e.point = c.manifold.points[bestP].point;
+                        e.normal = Vec2(-c.manifold.normal.x, -c.manifold.normal.y); // B->A stored; A->B reported (A8, Manifold.hpp:33)
+                        e.approachSpeed = best;
+                        m_contactHitEvents.push_back(e);
+                    }
+                }
+
                 const auto pairLess = [](const auto& l, const auto& r) noexcept
                 {
                     if (l.a != r.a) return FixtureLess(l.a, r.a);
@@ -2447,6 +2494,7 @@ namespace Manifold2D
                 };
                 std::sort(m_contactBeginEvents.begin(), m_contactBeginEvents.end(), pairLess);
                 std::sort(m_contactEndEvents[m_endEventIndex].begin(), m_contactEndEvents[m_endEventIndex].end(), pairLess);
+                std::sort(m_contactHitEvents.begin(), m_contactHitEvents.end(), pairLess);
                 m_endEventIndex = 1u - m_endEventIndex;
                 m_contactEndEvents[m_endEventIndex].clear();
             }

@@ -1433,6 +1433,11 @@ namespace Manifold2D
                 out.end());
         }
 
+        const Contact& ConstraintGraph::PoolContact(std::uint32_t id) const
+        {
+            return m_contactPool.Get(id); // asserts the id is alive
+        }
+
         const Contact* ConstraintGraph::FindContact(FixtureHandle a, FixtureHandle b) const
         {
             const std::uint32_t id = m_contactPool.Find(a, b);
