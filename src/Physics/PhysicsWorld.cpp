@@ -2006,10 +2006,12 @@ namespace Manifold2D
             // sub-step regrouping). Index-ordered, no wall-clock, no fast-math.
 
             // Begin/hit arrays are this step's only (Box2D world.c:710-712).
-            // End buffers stay: this step writes m_contactEndEvents[m_endEventIndex],
-            // and stage 6b flips that buffer into view.
+            // End buffers stay: this step writes m_contactEndEvents[m_endEventIndex]
+            // and m_sensorEndEvents[m_endEventIndex], and stage 6b flips that
+            // buffer into view.
             m_contactBeginEvents.clear();
             m_contactHitEvents.clear();
+            m_sensorBeginEvents.clear();
 
             // ---- stage 1: prev snapshot + kinematic integrate ----------------
             //
@@ -2436,10 +2438,11 @@ namespace Manifold2D
             }
 
             // ---- stage 6b: event arrays (spec 2026-10-08 s6) -----------------
-            // Hits first, then sort for determinism (s6.3), then flip the end
-            // buffers exactly as Box2D world.c:807-810: the buffer this step wrote
-            // becomes readable, the other is cleared for the next step and for
-            // destroys before it.
+            // Hits, then the sensor pass (overlap state updates even when the
+            // world gate is off), then sort for determinism (s6.3), then flip
+            // the end buffers exactly as Box2D world.c:807-810: the buffer this
+            // step wrote becomes readable, the other is cleared for the next
+            // step and for destroys before it.
             {
                 // Hits (Box2D solver.c:1758-1814): per solver contact that opted in,
                 // the point with the largest approach speed above the threshold among
@@ -2487,16 +2490,28 @@ namespace Manifold2D
                     }
                 }
 
+                // Sensor pass writes no simulation state. Pushes are gated inside
+                // PushSensorBegin / PushSensorEnd; overlap memory always updates.
+                RunSensorPass();
+
                 const auto pairLess = [](const auto& l, const auto& r) noexcept
                 {
                     if (l.a != r.a) return FixtureLess(l.a, r.a);
                     return FixtureLess(l.b, r.b);
                 };
+                const auto sensorLess = [](const auto& l, const auto& r) noexcept
+                {
+                    if (l.sensor != r.sensor) return FixtureLess(l.sensor, r.sensor);
+                    return FixtureLess(l.visitor, r.visitor);
+                };
                 std::sort(m_contactBeginEvents.begin(), m_contactBeginEvents.end(), pairLess);
                 std::sort(m_contactEndEvents[m_endEventIndex].begin(), m_contactEndEvents[m_endEventIndex].end(), pairLess);
                 std::sort(m_contactHitEvents.begin(), m_contactHitEvents.end(), pairLess);
+                std::sort(m_sensorBeginEvents.begin(), m_sensorBeginEvents.end(), sensorLess);
+                std::sort(m_sensorEndEvents[m_endEventIndex].begin(), m_sensorEndEvents[m_endEventIndex].end(), sensorLess);
                 m_endEventIndex = 1u - m_endEventIndex;
                 m_contactEndEvents[m_endEventIndex].clear();
+                m_sensorEndEvents[m_endEventIndex].clear();
             }
         }
 
@@ -2526,6 +2541,172 @@ namespace Manifold2D
             return ContactEvents{ m_contactBeginEvents,
                                   m_contactEndEvents[1u - m_endEventIndex],
                                   m_contactHitEvents };
+        }
+
+        void PhysicsWorld::PushSensorBegin(FixtureHandle sensor, BodyHandle sensorBody,
+                                           const SensorOverlap& overlap)
+        {
+            // Gate drops the push. Overlap state is updated by the caller either way.
+            if (!m_eventsEnabled) return;
+            m_sensorBeginEvents.push_back(SensorBeginEvent{
+                sensor, overlap.visitor, sensorBody, overlap.visitorBody });
+        }
+
+        void PhysicsWorld::PushSensorEnd(FixtureHandle sensor, BodyHandle sensorBody,
+                                         const SensorOverlap& overlap)
+        {
+            // Same gate as Begin. R10's beginReported pairing is contact-only;
+            // a sensor End that happens while the gate is off is dropped, and the
+            // overlap is already forgotten, so re-enabling does not emit it.
+            // Into the CURRENT end buffer (Box2D world.c:668): this step's pass
+            // writes it, then stage 6b flips. A sensor removed between steps is
+            // ended by the next step's pass, which writes the buffer that step flips.
+            if (!m_eventsEnabled) return;
+            m_sensorEndEvents[m_endEventIndex].push_back(SensorEndEvent{
+                sensor, overlap.visitor, sensorBody, overlap.visitorBody });
+        }
+
+        SensorEvents PhysicsWorld::GetSensorEvents() const noexcept
+        {
+            return SensorEvents{ m_sensorBeginEvents,
+                                 m_sensorEndEvents[1u - m_endEventIndex] };
+        }
+
+        bool PhysicsWorld::FixturesOverlapExact(std::uint32_t fa, std::uint32_t fb) const
+        {
+            // Same world-transform composition as DebugCollide (this file, the
+            // ComposeFixtureXf call there): body pose ∘ fixture local pose.
+            const std::uint32_t ba = m_fxBody[fa];
+            const std::uint32_t bb = m_fxBody[fb];
+            const Transform xfA = ComposeFixtureXf(
+                Vec2(m_posX[ba], m_posY[ba]), m_angle[ba],
+                Vec2(m_fxLocalPosX[fa], m_fxLocalPosY[fa]), m_fxLocalAngle[fa]);
+            const Transform xfB = ComposeFixtureXf(
+                Vec2(m_posX[bb], m_posY[bb]), m_angle[bb],
+                Vec2(m_fxLocalPosX[fb], m_fxLocalPosY[fb]), m_fxLocalAngle[fb]);
+            // Margin 0, no trace: a point with separation > 0 is strict penetration
+            // (Manifold.hpp:30-32). Matches ConstraintGraph.cpp exactlyOverlapping
+            // (the loop over manifold points). An exact edge touch (separation == 0)
+            // is not an overlap.
+            const Manifold manifold = Collide(m_fxShape[fa], xfA, m_fxShape[fb], xfB,
+                                              /*speculativeMargin*/ Real(0), nullptr);
+            for (int p = 0; p < manifold.pointCount; ++p)
+            {
+                if (manifold.points[p].separation > Real(0))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // End-of-step sensor pass (Box2D 3.1.1 sensor.c b2OverlapSensors, spec s6.1):
+        // every live sensor fixture with sensorEvents tests fixtures on bodies of
+        // EVERY type (sensor.c:179-181 queries all trees). Skip: same body (:72),
+        // filter (:77), visitor sensorEvents off (:66), visitor is a sensor
+        // (amendment A1 -- not in 3.1.1). Overlap = a narrowphase point with
+        // separation > 0 (margin 0, Collide). Overlaps are kept sorted per sensor and
+        // diffed against last pass: new -> Begin, missing -> End (sensor.c:270-340).
+        // A dead or recycled sensor slot (gen mismatch, or absent from the live set)
+        // ends everything it held (sensor.c:158-165 for the flag; destroy ends the
+        // overlaps the slot still holds). Ascending fixture-slot order + sorted
+        // visitors = deterministic arrays. Writes event buffers and m_sensorState only.
+        void PhysicsWorld::RunSensorPass()
+        {
+            // Liveness: a freed fixture slot keeps a NON-zero generation. RemoveBody
+            // sets m_alive[idx] = 0 and bumps m_fxGen (this file, RemoveBody). The
+            // authoritative live set is each alive body's m_bodyFixtures list.
+            // m_count is the body-slot high-water (ConstraintGraph reads w.m_count
+            // the same way). m_fxGen != 0 is NOT a live test.
+            if (m_sensorState.size() < m_fxCount) m_sensorState.resize(m_fxCount);
+            std::vector<std::uint32_t>& liveSensors = m_sensorSlotScratch;
+            std::vector<std::uint8_t>&  visited     = m_sensorVisitedScratch;
+            std::vector<BodyHandle>&    candidates  = m_sensorBodyScratch;
+            liveSensors.clear();
+            visited.assign(m_fxCount, std::uint8_t(0));
+            for (std::uint32_t b = 0; b < m_count; ++b)
+            {
+                if (m_alive[b] == 0) continue;
+                for (const std::uint32_t fi : m_bodyFixtures[b])
+                {
+                    if (m_fxSensor[fi] != 0u) liveSensors.push_back(fi);
+                }
+            }
+            std::sort(liveSensors.begin(), liveSensors.end());
+            std::vector<SensorOverlap> now;
+            for (const std::uint32_t fi : liveSensors)
+            {
+                visited[fi] = 1;
+                SensorState& st = m_sensorState[fi];
+                if (st.gen != m_fxGen[fi] && !st.overlaps.empty()) // slot recycled into a new sensor
+                {
+                    for (const SensorOverlap& o : st.overlaps)
+                    {
+                        PushSensorEnd(FixtureHandle{ fi, st.gen }, st.body, o);
+                    }
+                    st.overlaps.clear();
+                }
+                const std::uint32_t sb = m_fxBody[fi];
+                st.gen  = m_fxGen[fi];
+                st.body = HandleOf(sb);
+                if (m_fxSensorEvents[fi] == 0u) // flag off: end what it held (sensor.c:158)
+                {
+                    for (const SensorOverlap& o : st.overlaps)
+                    {
+                        PushSensorEnd(FixtureHandle{ fi, st.gen }, st.body, o);
+                    }
+                    st.overlaps.clear();
+                    continue;
+                }
+                now.clear();
+                QueryAABB(FixtureAabb(fi), candidates); // index-ordered, all body types
+                for (const BodyHandle bh : candidates)
+                {
+                    if (bh.index == sb) continue; // same body (sensor.c:72)
+                    for (const std::uint32_t vf : m_bodyFixtures[bh.index]) // live fixtures only
+                    {
+                        if (m_fxSensor[vf] != 0u || m_fxSensorEvents[vf] == 0u) continue;
+                        if (!FixturesCollide(fi, vf)) continue; // filter (sensor.c:77)
+                        if (!FixturesOverlapExact(fi, vf)) continue;
+                        now.push_back(SensorOverlap{ FixtureHandle{ vf, m_fxGen[vf] }, bh });
+                    }
+                }
+                std::sort(now.begin(), now.end(), [](const SensorOverlap& l, const SensorOverlap& r) noexcept
+                          { return FixtureLess(l.visitor, r.visitor); });
+                // Diff two sorted lists (sensor.c:270-340). A handle differs when
+                // its index OR its generation does (FixtureLess).
+                std::size_t i = 0, j = 0;
+                while (i < st.overlaps.size() || j < now.size())
+                {
+                    if (j == now.size() || (i < st.overlaps.size() && FixtureLess(st.overlaps[i].visitor, now[j].visitor)))
+                    {
+                        PushSensorEnd(FixtureHandle{ fi, st.gen }, st.body, st.overlaps[i++]);
+                    }
+                    else if (i == st.overlaps.size() || FixtureLess(now[j].visitor, st.overlaps[i].visitor))
+                    {
+                        PushSensorBegin(FixtureHandle{ fi, st.gen }, st.body, now[j++]);
+                    }
+                    else
+                    {
+                        ++i;
+                        ++j;
+                    }
+                }
+                st.overlaps.swap(now);
+            }
+            // Dead sensors (body removed, fixture dropped, or the slot recycled into
+            // a non-sensor): not in the live set, but still holding overlaps.
+            // End each with the OLD handles, then drop the memory.
+            for (std::uint32_t fi = 0; fi < m_fxCount; ++fi)
+            {
+                if (visited[fi] != 0u || m_sensorState[fi].overlaps.empty()) continue;
+                SensorState& st = m_sensorState[fi];
+                for (const SensorOverlap& o : st.overlaps)
+                {
+                    PushSensorEnd(FixtureHandle{ fi, st.gen }, st.body, o);
+                }
+                st.overlaps.clear();
+            }
         }
 
         // ----------------------------------------------------------------

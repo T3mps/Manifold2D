@@ -631,7 +631,10 @@ namespace Manifold2D
             // Begin/hit are this step's arrays; end is the buffer the previous flip
             // published (Box2D world.c:807-810, :1515). Valid until the next Step.
             [[nodiscard]] ContactEvents GetContactEvents() const noexcept;
-            [[nodiscard]] SensorEvents  GetSensorEvents() const { return {}; }
+            // Sensor begin is this step's array; sensor end is the buffer the
+            // previous flip published (same index as contact ends). Valid until
+            // the next Step.
+            [[nodiscard]] SensorEvents GetSensorEvents() const noexcept;
 
             // Test seam: the pool contact's eventFlags, or 0xFF when no contact exists.
             [[nodiscard]] std::uint8_t DebugContactEventFlags(FixtureHandle a, FixtureHandle b) const;
@@ -1339,6 +1342,37 @@ namespace Manifold2D
             void PushContactBegin(Contact& c);
             void PushContactEnd(Contact& c);
 
+            // One visitor recorded against a sensor fixture. The handles keep the
+            // generation from the pass that stored them, so a recycled slot
+            // compares unequal (Box2D sensor.c b2ShapeRef: shape id + generation).
+            struct SensorOverlap
+            {
+                FixtureHandle visitor{};
+                BodyHandle    visitorBody{};
+            };
+            // Per fixture slot, aligned with m_fxGen. gen/body name the sensor
+            // that owns `overlaps`. A gen mismatch means the slot was recycled.
+            struct SensorState
+            {
+                std::uint32_t              gen = 0;
+                BodyHandle                 body{};
+                std::vector<SensorOverlap> overlaps;
+            };
+
+            // Sensor begin/end. Both return immediately when the world gate is
+            // off. RunSensorPass still updates overlap state, so re-enabling
+            // does not burst. R10 (End iff Begin) is contact events only.
+            void PushSensorBegin(FixtureHandle sensor, BodyHandle sensorBody, const SensorOverlap& overlap);
+            void PushSensorEnd(FixtureHandle sensor, BodyHandle sensorBody, const SensorOverlap& overlap);
+
+            // End-of-step sensor pass (Box2D 3.1.1 sensor.c b2OverlapSensors, spec s6.1).
+            void RunSensorPass();
+
+            // True when Collide at margin 0 reports any point with separation > 0.
+            // Same exact-overlap rule as the legacy event derivation
+            // (ConstraintGraph.cpp exactlyOverlapping).
+            [[nodiscard]] bool FixturesOverlapExact(std::uint32_t fa, std::uint32_t fb) const;
+
             // ---- per-fixture broadphase helpers (Phase 2, Task 1) -------------
             //
             // UpdateMoverProxies(b): refreshes residency and all fixture proxies in
@@ -1605,6 +1639,21 @@ namespace Manifold2D
             std::vector<ContactHitEvent>   m_contactHitEvents;
             std::vector<ContactEndEvent>   m_contactEndEvents[2];
             std::uint32_t                  m_endEventIndex = 0;
+
+            // Sensor overlap memory + event arrays (spec s6.1). Begins are cleared
+            // at step start (Box2D world.c:710-712). Ends share m_endEventIndex
+            // with contact ends (world.c:807-810): this step writes
+            // m_sensorEndEvents[m_endEventIndex], and the flip publishes it.
+            // m_sensorState is per fixture slot. A freed fixture keeps a non-zero
+            // m_fxGen (RemoveBody bumps it), so liveness is each alive body's
+            // m_bodyFixtures list, not m_fxGen != 0.
+            std::vector<SensorState>       m_sensorState;
+            std::vector<SensorBeginEvent>  m_sensorBeginEvents;
+            std::vector<SensorEndEvent>    m_sensorEndEvents[2];
+            // Reused RunSensorPass scratch (clear/assign keeps capacity).
+            std::vector<std::uint32_t>     m_sensorSlotScratch;
+            std::vector<std::uint8_t>      m_sensorVisitedScratch;
+            std::vector<BodyHandle>        m_sensorBodyScratch;
 
             // ---- dynamics config (P2.1 + P2.2) -----------------------------
             // Global gravity applied to awake Dynamic bodies in Step.
