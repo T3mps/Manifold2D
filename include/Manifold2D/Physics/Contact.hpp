@@ -97,6 +97,7 @@ namespace Manifold2D
             // updated on a HIT.
             bool          eventRelevant = false;
             std::uint8_t  eventFlags = 0;   // kEvContact | kEvHit, fixed at create (Events.hpp)
+            bool          beginReported = false; // set when a Begin was actually pushed; an End is pushed iff it is set (R10)
             std::uint32_t genA = 0;         // body generations at create: an End emitted after
             std::uint32_t genB = 0;         // RemoveBody bumped m_gen still names the old handle
             // PERSISTENT COLOR (collision-rebuild Phase C, Stage 2, Tasks 4-5).

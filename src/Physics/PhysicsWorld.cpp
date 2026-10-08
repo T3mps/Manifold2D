@@ -1944,7 +1944,8 @@ namespace Manifold2D
                 return;
             }
             m_eventsEnabled = on;
-            // The new contact arrays gate only on m_eventsEnabled (PushContact*).
+            // Begin events gate on m_eventsEnabled. An End is delivered iff its
+            // Begin was (Contact::beginReported, R10), even after the gate closes.
             // Legacy listener: on->off Disarm all, off->on Rearm all overlapping.
             // Ports setEventsEnabled. Stays until M7 removes ContactManager.
             if (on)
@@ -2451,21 +2452,25 @@ namespace Manifold2D
             }
         }
 
-        void PhysicsWorld::PushContactBegin(const Contact& c)
+        void PhysicsWorld::PushContactBegin(Contact& c)
         {
             if (!m_eventsEnabled) return;
             m_contactBeginEvents.push_back(ContactBeginEvent{ c.a, c.b,
                 BodyHandle{ c.bodyA, c.genA }, BodyHandle{ c.bodyB, c.genB } });
+            c.beginReported = true; // R10: an End is delivered iff this Begin was
         }
 
-        void PhysicsWorld::PushContactEnd(const Contact& c)
+        void PhysicsWorld::PushContactEnd(Contact& c)
         {
-            if (!m_eventsEnabled) return;
+            // R10: iff a Begin was actually pushed, regardless of the gate now.
             // Into the CURRENT end buffer (Box2D world.c:668 / contact.c:364): a step
             // writes it, then flips at its end; a destroy between steps writes the
-            // buffer the NEXT step will flip and deliver.
+            // buffer the NEXT step will flip and deliver. Clear only after the push
+            // so a throwing allocation does not drop the pairing bit.
+            if (!c.beginReported) return;
             m_contactEndEvents[m_endEventIndex].push_back(ContactEndEvent{ c.a, c.b,
                 BodyHandle{ c.bodyA, c.genA }, BodyHandle{ c.bodyB, c.genB } });
+            c.beginReported = false;
         }
 
         ContactEvents PhysicsWorld::GetContactEvents() const noexcept

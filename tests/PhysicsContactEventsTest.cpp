@@ -137,7 +137,7 @@ TEST_CASE("the world gate drops events without a burst on re-enable", "[physics]
 {
     PhysicsWorld w{ WorldDef{} };
     AddGround(w);
-    AddBox(w, Real(0), Real(-2));
+    const BodyHandle b = AddBox(w, Real(0), Real(-2));
     w.SetEventsEnabled(false);
     EventLog log;
     log.StepAndCollect(w, 120);                     // lands while gated
@@ -146,4 +146,23 @@ TEST_CASE("the world gate drops events without a burst on re-enable", "[physics]
     log.StepAndCollect(w, 10);                      // still touching
     CHECK(log.begin.empty());                       // no burst
     CHECK(log.end.empty());                         // and no orphan End
+    w.SetPosition(b, Vec2(Real(0), Real(-5)));      // separate after re-enable
+    log.StepAndCollect(w, 2);
+    CHECK(log.end.empty());                         // no End: its Begin was never delivered (R10)
+}
+
+TEST_CASE("disabling the gate mid-contact still delivers the End", "[physics][events]")
+{
+    PhysicsWorld w{ WorldDef{} };
+    AddGround(w);
+    const BodyHandle b = AddBox(w, Real(0), Real(-2));
+    EventLog log;
+    log.StepAndCollect(w, 120);                     // lands while the gate is open
+    REQUIRE(log.begin.size() == 1);
+    CHECK(log.end.empty());
+    w.SetEventsEnabled(false);
+    w.SetPosition(b, Vec2(Real(0), Real(-5)));      // separate while gated
+    log.StepAndCollect(w, 2);
+    CHECK(log.begin.size() == 1);                   // no further Begin
+    CHECK(log.end.size() == 1);                     // the reported Begin still closes (R10)
 }

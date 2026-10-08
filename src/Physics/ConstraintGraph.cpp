@@ -1544,12 +1544,12 @@ namespace Manifold2D
         // w.m_islandMgr), releases the persistent color, and destroys the pool
         // slot. Order is FROZEN (the End and the detach read c before the pool
         // frees it; the RemoveBody color-leak assert gates the pairing).
-        void ConstraintGraph::ReleaseAndDestroyContact(PhysicsWorld& w, std::uint32_t id, const Contact& c)
+        void ConstraintGraph::ReleaseAndDestroyContact(PhysicsWorld& w, std::uint32_t id, Contact& c)
         {
-            // Destroy-time End (Box2D contact.c:354-364): a touching contact that
-            // reports, destroyed for any reason (RemoveBody, DropFixture,
-            // SetBodyFilter, fat-box separation), ends here. Read c before the pool
-            // frees the slot -- the frozen order below still holds.
+            // Destroy-time End (Box2D contact.c:354-364, R10): a touching contact
+            // whose Begin was delivered ends here, whatever the gate is now.
+            // PushContactEnd reads and clears c before the pool frees the slot --
+            // the frozen order below still holds.
             if (c.touching && (c.eventFlags & kEvContact) != 0u)
             {
                 w.PushContactEnd(c);

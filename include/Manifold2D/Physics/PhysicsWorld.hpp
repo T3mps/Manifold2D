@@ -1332,11 +1332,12 @@ namespace Manifold2D
             // snapshot hook on SolverContext::traceHook. See StepTraced.
             void StepImpl(Real dt, StepTrace* trace);
 
-            // Contact begin/end writers. Gated only on m_eventsEnabled (the legacy
-            // ContactManager Disarm/Rearm path is separate and stays until M7).
-            // ConstraintGraph is a friend and calls these from the serial tail.
-            void PushContactBegin(const Contact& c);
-            void PushContactEnd(const Contact& c);
+            // Contact begin/end writers (R10: an End is delivered iff its Begin was).
+            // Begin pushes only while m_eventsEnabled is set, and sets beginReported.
+            // End pushes iff beginReported, ignoring the gate, then clears the bit.
+            // The legacy ContactManager Disarm/Rearm path stays until M7.
+            void PushContactBegin(Contact& c);
+            void PushContactEnd(Contact& c);
 
             // ---- per-fixture broadphase helpers (Phase 2, Task 1) -------------
             //
