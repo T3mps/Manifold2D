@@ -198,12 +198,28 @@ TEST_CASE("DropFixture and a filter change end a touching contact", "[physics][e
     // add appends, but the handle is taken first so it cannot be the new one),
     // add a second fixture, then drop the original.
     const FixtureHandle original = w.GetBodyFixture(b1, 0);
+    const FixtureHandle b2Fixture = w.GetBodyFixture(b2, 0);
     FixtureDef extra; extra.shape = MakeCircle(Real(0.1)); extra.localPos = Vec2(Real(0), Real(-3));
     w.AddFixture(b1, extra);
     w.DropFixture(original);
     w.SetBodyFilter(b2, 2u, 0u);                    // collides with nothing now
     EventLog log; log.StepAndCollect(w, 1);
-    CHECK(log.end.size() == 2);
+    REQUIRE(log.end.size() == 2);
+    // Exactly one End per contact. A pair of Ends for one body and none for
+    // the other would still have size 2.
+    int endsB1 = 0;
+    int endsB2 = 0;
+    for (const ContactEndEvent& e : log.end)
+    {
+        const bool hit1 = (e.bodyA == b1 || e.bodyB == b1) &&
+                          (e.a == original || e.b == original);
+        const bool hit2 = (e.bodyA == b2 || e.bodyB == b2) &&
+                          (e.a == b2Fixture || e.b == b2Fixture);
+        if (hit1 && !hit2) ++endsB1;
+        if (hit2 && !hit1) ++endsB2;
+    }
+    CHECK(endsB1 == 1);                             // dropped fixture 0, not the added circle
+    CHECK(endsB2 == 1);                             // b2's fixture, ended by the filter
 }
 
 TEST_CASE("A contact that separates by fat box while touching still ends", "[physics][events]")
