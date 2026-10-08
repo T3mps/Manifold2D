@@ -1,6 +1,7 @@
 // PhysicsContactEventsTest.cpp
 // [physics][events]: contact begin/end arrays (spec 2026-10-08 s6.1),
 // including destroy-time Ends (RemoveBody, DropFixture, filter, fat box).
+#include <atomic>
 #include <bit>
 #include <cstdint>
 #include <thread>
@@ -404,6 +405,63 @@ namespace
         }
         return trace;
     }
+
+    // Forwards ParallelFor and WorkerCount unchanged. Each range records the
+    // worker index the callback actually receives. SoftStep is the only caller
+    // that passes minBatch == 1 and count == WorkerCount() (SoftStep.cpp, the
+    // persistent solver region); those lanes are counted on their own.
+    class RecordingScheduler final : public Mosaic::IWorkScheduler
+    {
+    public:
+        explicit RecordingScheduler(Mosaic::IWorkScheduler& inner) noexcept
+            : m_inner(inner) {}
+
+        void ParallelFor(std::size_t count, std::size_t minBatch,
+                         Mosaic::FunctionRef<void(std::size_t, std::size_t,
+                                                  std::uint32_t)> fn) override
+        {
+            const bool solverLane = minBatch == 1
+                && count == static_cast<std::size_t>(m_inner.WorkerCount())
+                && count > 1;
+            m_inner.ParallelFor(count, minBatch,
+                [&](std::size_t begin, std::size_t end, std::uint32_t worker)
+                {
+                    Note(m_seen, worker);
+                    if (solverLane) Note(m_solverSeen, worker);
+                    fn(begin, end, worker);
+                });
+        }
+
+        [[nodiscard]] std::uint32_t WorkerCount() const noexcept override
+        {
+            return m_inner.WorkerCount();
+        }
+
+        [[nodiscard]] int DistinctWorkers() const { return Pop(m_seen); }
+        [[nodiscard]] int DistinctSolverWorkers() const { return Pop(m_solverSeen); }
+
+    private:
+        static constexpr std::uint32_t kWords = 4; // worker ids 0..255
+
+        static void Note(std::atomic<std::uint64_t> (&words)[kWords], std::uint32_t worker)
+        {
+            if (worker >= kWords * 64u) return;
+            const std::uint64_t bit = std::uint64_t{1} << (worker & 63u);
+            words[worker >> 6].fetch_or(bit, std::memory_order_relaxed);
+        }
+
+        static int Pop(const std::atomic<std::uint64_t> (&words)[kWords])
+        {
+            int n = 0;
+            for (const std::atomic<std::uint64_t>& word : words)
+                n += std::popcount(word.load(std::memory_order_relaxed));
+            return n;
+        }
+
+        Mosaic::IWorkScheduler&        m_inner;
+        std::atomic<std::uint64_t>     m_seen[kWords]{};
+        std::atomic<std::uint64_t>     m_solverSeen[kWords]{};
+    };
 }
 
 TEST_CASE("Event arrays are byte-identical across runs", "[physics][events][determinism]")
@@ -419,20 +477,21 @@ TEST_CASE("Event arrays are byte-identical serial vs MT", "[physics][events][det
     Mosaic::SerialWorkScheduler serial;
     const std::uint32_t hw = std::thread::hardware_concurrency();
     Manifold2D::Testing::TestWorkScheduler many(hw > 1u ? hw : 2u);
+    RecordingScheduler recorded(many);
 
-    // Same sizing as SoftStep::BuildStages. There is no runtime counter for
-    // blocks stolen; WorkerCount() is the hook SolverMtInvarianceTest uses.
+    // Scene is large enough for >1 body block (kBodyMinBlock). The proof that
+    // a second lane ran is recorded.DistinctSolverWorkers(), not this count.
     const int maxBodyBlocks = (kDynamicBoxes + kBodyMinBlock - 1) / kBodyMinBlock;
     const int targetBlocks  = 4 * static_cast<int>(many.WorkerCount());
     const int bodyBlocks    = targetBlocks < maxBodyBlocks ? targetBlocks : maxBodyBlocks;
-    INFO("workers=" << many.WorkerCount() << " dynamics=" << kDynamicBoxes
-         << " bodyMinBlock=" << kBodyMinBlock << " bodyBlocks=" << bodyBlocks);
-    REQUIRE(many.WorkerCount() > 1u);
     REQUIRE(bodyBlocks > 1);
 
     const EventTrace serialTrace = RunEventTrace(&serial);
-    const EventTrace mtTrace     = RunEventTrace(&many);
+    const EventTrace mtTrace     = RunEventTrace(&recorded);
     RequirePopulated(serialTrace);
     RequirePopulated(mtTrace);
     CHECK(serialTrace.words == mtTrace.words);
+    INFO("distinct workers=" << recorded.DistinctWorkers()
+         << " solver workers=" << recorded.DistinctSolverWorkers());
+    REQUIRE(recorded.DistinctSolverWorkers() > 1);
 }
