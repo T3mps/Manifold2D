@@ -72,6 +72,7 @@
 #include <Manifold2D/Physics/PhysicsTypes.hpp>
 #include <Manifold2D/Physics/Shapes.hpp>
 #include <Manifold2D/Physics/Fixture.hpp>
+#include <Manifold2D/Physics/Events.hpp>
 #include <Manifold2D/Physics/Broadphase/Broadphase.hpp>
 #include <Manifold2D/Physics/Broadphase/DynamicTree.hpp> // FixtureBroadphaseTree() debug accessor
 #include <Manifold2D/Physics/Broadphase/Passability.hpp>
@@ -114,6 +115,10 @@ namespace Manifold2D
             Vec2     position{ Real(0), Real(0) };
             Shape    shape{}; // required; stored by value per slot
             bool     isSensor      = false;
+            // copied onto the auto-fixture, like isSensor
+            bool     contactEvents = false;
+            bool     sensorEvents  = false;
+            bool     hitEvents     = false;
             bool     eventsEnabled = true;
 
             // ---- dynamics (P2.1) -- ignored for Static/Kinematic ------------
@@ -280,6 +285,13 @@ namespace Manifold2D
             // 0.05 m/s applies directly. Per-body override via BodyDef::sleepThreshold
             // (>= 0). The maxExtent weighting handles body size.
             Real          sleepThreshold = Real(0.05);
+
+            // Approach speed (m/s) a touching point must EXCEED to report a hit
+            // (Box2D b2WorldDef::hitEventThreshold, types.c:14: 1 m/s).
+            Real          hitEventThreshold = Real(1);
+            // false: a contact reports begin/end if EITHER fixture opts in (Box2D
+            // contact.c:253). true: BOTH must (Arcane's policy, spec amendment A2).
+            bool          contactEventsRequireBoth = false;
         };
 
         class Body; // forward decl (Body.hpp); ergonomic view over a handle.
@@ -609,6 +621,19 @@ namespace Manifold2D
             // the bodies it touched are woken. Not for every tick: it costs a
             // contact teardown, like Box2D's.
             void SetBodyFilter(BodyHandle h, std::uint32_t categoryBits, std::uint32_t maskBits);
+
+            // Per-fixture event opt-ins. contact and hit apply to contacts created
+            // afterwards; sensor is read every sensor pass (spec s6.1, amendment A3).
+            void SetFixtureEvents(FixtureHandle fh, bool contact, bool sensor, bool hit);
+            void SetHitEventThreshold(Real threshold);
+            void SetContactEventsRequireBoth(bool both) noexcept { m_contactEventsRequireBoth = both; }
+
+            // Empty until later tasks fill the arrays. Spans are valid until the next Step.
+            [[nodiscard]] ContactEvents GetContactEvents() const { return {}; }
+            [[nodiscard]] SensorEvents  GetSensorEvents() const { return {}; }
+
+            // Test seam: the pool contact's eventFlags, or 0xFF when no contact exists.
+            [[nodiscard]] std::uint8_t DebugContactEventFlags(FixtureHandle a, FixtureHandle b) const;
 
             // Make a live body a bullet, or stop it being one (b2Body_SetBullet). A
             // dynamic bullet's step is swept against statics, kinematic bodies and
@@ -1381,6 +1406,7 @@ namespace Manifold2D
             }
         private:
             std::vector<std::uint8_t>   m_fxSensor;
+            std::vector<std::uint8_t>   m_fxContactEvents, m_fxSensorEvents, m_fxHitEvents;
             std::vector<std::uint32_t>  m_fxBody;    // owning body slot
             std::vector<std::uint32_t>  m_fxGen;     // generation per fixture slot
 
@@ -1578,6 +1604,8 @@ namespace Manifold2D
             bool          m_enableContinuous = true;            // Box2D v3 b2WorldDef::enableContinuous
             Real          m_maxLinearVelocity = Real(400);
             Real          m_sleepThresholdDefault  = Real(0.05); // WorldDef::sleepThreshold (Box2D v3, types.c:34)
+            Real          m_hitEventThreshold = Real(1);          // WorldDef::hitEventThreshold (Box2D v3, types.c:14)
+            bool          m_contactEventsRequireBoth = false;     // WorldDef::contactEventsRequireBoth
 
             // ---- contacts --------------------------------------------------
             ContactManager m_contacts;

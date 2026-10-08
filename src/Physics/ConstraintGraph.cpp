@@ -12,6 +12,7 @@
 #include <cmath>
 
 #include <Manifold2D/Physics/Contact.hpp>                    // Contact + ContactPool + kInvalidColor
+#include <Manifold2D/Physics/Events.hpp>                     // kEvContact / kEvHit (captured at create)
 #include <Manifold2D/Physics/PhysicsWorld.hpp>               // the world SoA + island/awake seams (befriended)
 #include <Manifold2D/Physics/Broadphase/DynamicTree.hpp>     // DynamicTree::kMargin + TryGetFatBox (fat-box gates)
 #include <Manifold2D/Physics/Narrowphase/GeometryKernel.hpp> // AabbOverlap
@@ -504,6 +505,22 @@ namespace Manifold2D
                 c.bIsBody        = true;
                 c.solverRelevant = solverRelevant;
                 c.eventRelevant  = eventRelevant;
+
+                // Event opt-ins, decided ONCE here (Box2D contact.c:253-256 contact
+                // events, :535-541 hit events). Only solver contacts report -- a
+                // dynamic body present, no sensor -- which is Box2D's contact set
+                // (it makes no kinematic-static contact; sensors go through the
+                // sensor pass). Spec s6.1, amendments A2/A9.
+                c.genA = w.m_gen[ia];
+                c.genB = w.m_gen[ib];
+                if (solverRelevant)
+                {
+                    const bool evA = w.m_fxContactEvents[fia] != 0u;
+                    const bool evB = w.m_fxContactEvents[fib] != 0u;
+                    const bool contactOn = w.m_contactEventsRequireBoth ? (evA && evB) : (evA || evB);
+                    const bool hitOn = (w.m_fxHitEvents[fia] | w.m_fxHitEvents[fib]) != 0u;
+                    c.eventFlags = static_cast<std::uint8_t>((contactOn ? kEvContact : 0u) | (hitOn ? kEvHit : 0u));
+                }
 
                 // Phase C, Task 4: assign a persistent graph color to a NEW
                 // solver-relevant body-body contact (assign-at-create). Sensors,
@@ -1403,6 +1420,12 @@ namespace Manifold2D
             out.erase(
                 std::unique(out.begin(), out.end()),
                 out.end());
+        }
+
+        const Contact* ConstraintGraph::FindContact(FixtureHandle a, FixtureHandle b) const
+        {
+            const std::uint32_t id = m_contactPool.Find(a, b);
+            return id == ContactPool::kNone ? nullptr : &m_contactPool.Get(id);
         }
 
         bool ConstraintGraph::DebugHasContact(const PhysicsWorld& w,

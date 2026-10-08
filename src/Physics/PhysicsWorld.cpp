@@ -158,6 +158,8 @@ namespace Manifold2D
             , m_enableContinuous(def.enableContinuous)
             , m_maxLinearVelocity(def.maxLinearVelocity)
             , m_sleepThresholdDefault(def.sleepThreshold)
+            , m_hitEventThreshold(def.hitEventThreshold)
+            , m_contactEventsRequireBoth(def.contactEventsRequireBoth)
             , m_solver(MakeSolver(def))
         {
             // Optional tile statics: own a TileGrid over the passability seam if
@@ -274,6 +276,9 @@ namespace Manifold2D
             m_fxFilterMask.resize(next, 0xFFFFFFFFu);
             m_fxFilterGroup.resize(next, 0);
             m_fxSensor.resize(next, std::uint8_t(0));
+            m_fxContactEvents.resize(next, std::uint8_t(0));
+            m_fxSensorEvents.resize(next, std::uint8_t(0));
+            m_fxHitEvents.resize(next, std::uint8_t(0));
             m_fxBody.resize(next, 0u);
             m_fxGen.resize(next, 0u); // 0 = dead; live starts at 1
         }
@@ -515,6 +520,9 @@ namespace Manifold2D
             m_fxFilterMask[fi] = def.maskBits;
             m_fxFilterGroup[fi] = def.groupIndex;
             m_fxSensor[fi]     = def.isSensor ? std::uint8_t(1) : std::uint8_t(0);
+            m_fxContactEvents[fi] = def.contactEvents ? std::uint8_t(1) : std::uint8_t(0);
+            m_fxSensorEvents[fi]  = def.sensorEvents  ? std::uint8_t(1) : std::uint8_t(0);
+            m_fxHitEvents[fi]     = def.hitEvents     ? std::uint8_t(1) : std::uint8_t(0);
             m_fxBody[fi]       = bodySlot;
             m_fxGen[fi]       += 1u; // bump generation (dead=0, live starts at 1)
 
@@ -1167,6 +1175,9 @@ namespace Manifold2D
                 autoFd.maskBits     = def.maskBits;
                 autoFd.groupIndex   = def.groupIndex;
                 autoFd.isSensor     = def.isSensor;
+                autoFd.contactEvents = def.contactEvents;
+                autoFd.sensorEvents  = def.sensorEvents;
+                autoFd.hitEvents     = def.hitEvents;
                 const std::uint32_t autoFi = AllocFixtureSlot(idx, autoFd); // no RecomputeBodyMass
 
                 // Register the auto-fixture in the per-fixture mover broadphase
@@ -1808,6 +1819,36 @@ namespace Manifold2D
             {
                 Wake(h);
             }
+        }
+
+        void PhysicsWorld::SetFixtureEvents(FixtureHandle fh, bool contact, bool sensor, bool hit)
+        {
+            if (!IsValid(fh))
+            {
+                MOSAIC_LOG_WARN("operation on a stale/invalid FixtureHandle ignored");
+                return;
+            }
+            // contact/hit apply to contacts CREATED afterwards (captured at create,
+            // Box2D contact.c:253); sensor is read every sensor pass (spec s6.1, A3).
+            m_fxContactEvents[fh.index] = contact ? std::uint8_t(1) : std::uint8_t(0);
+            m_fxSensorEvents[fh.index]  = sensor  ? std::uint8_t(1) : std::uint8_t(0);
+            m_fxHitEvents[fh.index]     = hit     ? std::uint8_t(1) : std::uint8_t(0);
+        }
+
+        void PhysicsWorld::SetHitEventThreshold(Real threshold)
+        {
+            if (!std::isfinite(threshold) || threshold < Real(0))
+            {
+                MOSAIC_LOG_WARN("SetHitEventThreshold: negative or non-finite threshold ignored");
+                return;
+            }
+            m_hitEventThreshold = threshold;
+        }
+
+        std::uint8_t PhysicsWorld::DebugContactEventFlags(FixtureHandle a, FixtureHandle b) const
+        {
+            const Contact* c = m_graph.FindContact(a, b);
+            return c != nullptr ? c->eventFlags : std::uint8_t(0xFF);
         }
 
         Real PhysicsWorld::GravityScale(BodyHandle h) const noexcept

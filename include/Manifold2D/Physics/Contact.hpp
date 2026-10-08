@@ -96,6 +96,9 @@ namespace Manifold2D
             // LIFETIME-INVARIANT like solverRelevant: set once at create, never
             // updated on a HIT.
             bool          eventRelevant = false;
+            std::uint8_t  eventFlags = 0;   // kEvContact | kEvHit, fixed at create (Events.hpp)
+            std::uint32_t genA = 0;         // body generations at create: an End emitted after
+            std::uint32_t genB = 0;         // RemoveBody bumped m_gen still names the old handle
             // PERSISTENT COLOR (collision-rebuild Phase C, Stage 2, Tasks 4-5).
             // The graph color assigned ONCE when this solver-relevant body-body
             // contact is created (ConstraintGraph::AssignContactColor), released back

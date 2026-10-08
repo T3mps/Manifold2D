@@ -90,6 +90,14 @@ namespace Manifold2D
             // Sensor fixtures detect overlap events but do NOT generate
             // contact constraints (no collision response). Mirrors Box2D.
             bool isSensor = false;
+
+            // Event opt-ins (Box2D b2ShapeDef enableContactEvents / enableSensorEvents
+            // / enableHitEvents, types.h:385-392). All default OFF, like Box2D's
+            // b2DefaultShapeDef (types.c:55-65). contact + hit are captured when a
+            // contact is created; sensor is read every sensor pass (spec s6.1).
+            bool contactEvents = false;
+            bool sensorEvents  = false;
+            bool hitEvents     = false;
         };
 
     } // namespace Physics

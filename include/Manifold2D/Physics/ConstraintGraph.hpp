@@ -181,6 +181,10 @@ namespace Manifold2D
             [[nodiscard]] bool DebugHasContact(const PhysicsWorld& w,
                                                BodyHandle a, BodyHandle b) const;
 
+            // The pool contact for the unordered fixture pair, or nullptr.
+            // Same order-independent key ContactPool::EnsurePair / Find uses.
+            [[nodiscard]] const Contact* FindContact(FixtureHandle a, FixtureHandle b) const;
+
             // ---- world-lifecycle seams (PhysicsWorld drives these) -----------
             // Grow the per-body color-mask column to `next` (EnsureCapacity seam).
             // A fresh/recycled slot starts with NO colors occupied.
