@@ -1,5 +1,6 @@
 // PhysicsContactEventsTest.cpp
-// [physics][events]: contact begin/end arrays (spec 2026-10-08 s6.1).
+// [physics][events]: contact begin/end arrays (spec 2026-10-08 s6.1),
+// including destroy-time Ends (RemoveBody, DropFixture, filter, fat box).
 #include <catch2/catch_test_macros.hpp>
 #include "PhysicsEventTestHelpers.hpp"
 
@@ -165,4 +166,54 @@ TEST_CASE("disabling the gate mid-contact still delivers the End", "[physics][ev
     log.StepAndCollect(w, 2);
     CHECK(log.begin.size() == 1);                   // no further Begin
     CHECK(log.end.size() == 1);                     // the reported Begin still closes (R10)
+}
+
+TEST_CASE("Removing a touching body ends the contact on the next step, once", "[physics][events]")
+{
+    PhysicsWorld w{ WorldDef{} };
+    AddGround(w);                                   // contactEvents on (R10)
+    const BodyHandle b = AddBox(w, Real(0), Real(-2));
+    EventLog settle; settle.StepAndCollect(w, 120);
+    REQUIRE(settle.begin.size() == 1);
+    // No Step between the remove and the two Steps below. The End is buffered,
+    // delivered on the first of those Steps, and not repeated on the second.
+    w.RemoveBody(b);
+    EventLog log;
+    log.StepAndCollect(w, 1);
+    REQUIRE(log.end.size() == 1);
+    CHECK(log.end[0].bodyA == b);                   // old generation (Contact::genA), not the bumped one
+    log.StepAndCollect(w, 1);
+    CHECK(log.end.size() == 1);                     // delivered once, on the first step only
+}
+
+TEST_CASE("DropFixture and a filter change end a touching contact", "[physics][events]")
+{
+    PhysicsWorld w{ WorldDef{} };
+    AddGround(w);
+    const BodyHandle b1 = AddBox(w, Real(-3), Real(-2));
+    const BodyHandle b2 = AddBox(w, Real(3), Real(-2));
+    EventLog settle; settle.StepAndCollect(w, 120);
+    REQUIRE(settle.begin.size() == 2);
+    // Keep b1 a body: capture fixture 0 before AddFixture (drop is swap-remove;
+    // add appends, but the handle is taken first so it cannot be the new one),
+    // add a second fixture, then drop the original.
+    const FixtureHandle original = w.GetBodyFixture(b1, 0);
+    FixtureDef extra; extra.shape = MakeCircle(Real(0.1)); extra.localPos = Vec2(Real(0), Real(-3));
+    w.AddFixture(b1, extra);
+    w.DropFixture(original);
+    w.SetBodyFilter(b2, 2u, 0u);                    // collides with nothing now
+    EventLog log; log.StepAndCollect(w, 1);
+    CHECK(log.end.size() == 2);
+}
+
+TEST_CASE("A contact that separates by fat box while touching still ends", "[physics][events]")
+{
+    PhysicsWorld w{ WorldDef{} };
+    AddGround(w);
+    const BodyHandle b = AddBox(w, Real(0), Real(-2));
+    EventLog settle; settle.StepAndCollect(w, 120);
+    REQUIRE(settle.begin.size() == 1);              // Begin was reported (R10)
+    w.SetPosition(b, Vec2(Real(0), Real(-50)));     // far beyond the fat AABB in one move
+    EventLog log; log.StepAndCollect(w, 1);
+    CHECK(log.end.size() == 1);
 }
