@@ -1944,8 +1944,9 @@ namespace Manifold2D
                 return;
             }
             m_eventsEnabled = on;
-            // on->off: Disarm all. off->on: Rearm all overlapping. Ports
-            // setEventsEnabled.
+            // The new contact arrays gate only on m_eventsEnabled (PushContact*).
+            // Legacy listener: on->off Disarm all, off->on Rearm all overlapping.
+            // Ports setEventsEnabled. Stays until M7 removes ContactManager.
             if (on)
             {
                 m_contacts.Rearm(*this);
@@ -2002,6 +2003,12 @@ namespace Manifold2D
             // this equals the P2.1 single-step semi-implicit Euler to f32
             // tolerance (the PhysicsDynamics free-fall test's margins absorb the
             // sub-step regrouping). Index-ordered, no wall-clock, no fast-math.
+
+            // Begin/hit arrays are this step's only (Box2D world.c:710-712).
+            // End buffers stay: this step writes m_contactEndEvents[m_endEventIndex],
+            // and stage 6b flips that buffer into view.
+            m_contactBeginEvents.clear();
+            m_contactHitEvents.clear();
 
             // ---- stage 1: prev snapshot + kinematic integrate ----------------
             //
@@ -2426,6 +2433,46 @@ namespace Manifold2D
                 m_graph.CollectTouchedEventPairs(m_touchedEventPairs);
                 m_contacts.Step(*this, m_touchedEventPairs);
             }
+
+            // ---- stage 6b: event arrays (spec 2026-10-08 s6) -----------------
+            // Sort for determinism (s6.3), then flip the end buffers exactly as
+            // Box2D world.c:807-810: the buffer this step wrote becomes readable,
+            // the other is cleared for the next step and for destroys before it.
+            {
+                const auto pairLess = [](const auto& l, const auto& r) noexcept
+                {
+                    if (l.a != r.a) return FixtureLess(l.a, r.a);
+                    return FixtureLess(l.b, r.b);
+                };
+                std::sort(m_contactBeginEvents.begin(), m_contactBeginEvents.end(), pairLess);
+                std::sort(m_contactEndEvents[m_endEventIndex].begin(), m_contactEndEvents[m_endEventIndex].end(), pairLess);
+                m_endEventIndex = 1u - m_endEventIndex;
+                m_contactEndEvents[m_endEventIndex].clear();
+            }
+        }
+
+        void PhysicsWorld::PushContactBegin(const Contact& c)
+        {
+            if (!m_eventsEnabled) return;
+            m_contactBeginEvents.push_back(ContactBeginEvent{ c.a, c.b,
+                BodyHandle{ c.bodyA, c.genA }, BodyHandle{ c.bodyB, c.genB } });
+        }
+
+        void PhysicsWorld::PushContactEnd(const Contact& c)
+        {
+            if (!m_eventsEnabled) return;
+            // Into the CURRENT end buffer (Box2D world.c:668 / contact.c:364): a step
+            // writes it, then flips at its end; a destroy between steps writes the
+            // buffer the NEXT step will flip and deliver.
+            m_contactEndEvents[m_endEventIndex].push_back(ContactEndEvent{ c.a, c.b,
+                BodyHandle{ c.bodyA, c.genA }, BodyHandle{ c.bodyB, c.genB } });
+        }
+
+        ContactEvents PhysicsWorld::GetContactEvents() const noexcept
+        {
+            return ContactEvents{ m_contactBeginEvents,
+                                  m_contactEndEvents[1u - m_endEventIndex],
+                                  m_contactHitEvents };
         }
 
         // ----------------------------------------------------------------

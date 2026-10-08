@@ -611,13 +611,9 @@ namespace Manifold2D
             const bool wasTouching = c.touching;
             c.touching = (c.manifold.pointCount > 0);
 
-            // Classify the dyn-dyn touch transition (island edge) -> flag for the tail.
-            // Gate on c.solverRelevant: sensor dyn-dyn pairs must never trigger a
-            // merge (kNpStarted) or split (kNpStopped) -- they fire events but must
-            // not couple rigid islands.
-            if (c.solverRelevant && c.bIsBody && c.bodyB != kInvalidSlot &&
-                w.TypeSlot(c.bodyA) == BodyType::Dynamic &&
-                w.TypeSlot(c.bodyB) == BodyType::Dynamic)
+            // Touching transitions for EVERY solver contact (events, spec s6.1);
+            // the island consumers in the serial tail re-check dynamic-dynamic.
+            if (c.solverRelevant && c.bIsBody && c.bodyB != kInvalidSlot)
             {
                 if (!wasTouching && c.touching)      { c.npState |= kNpStarted; }
                 else if (wasTouching && !c.touching) { c.npState |= kNpStopped; }
@@ -638,6 +634,16 @@ namespace Manifold2D
                     }
                 }
             }
+        }
+
+        // The island merge/split edge predicate (unchanged semantics): a solver
+        // contact between two DYNAMIC bodies.
+        static bool IsDynDynSolver(const PhysicsWorld& w, const Contact& c) noexcept
+        {
+            return c.solverRelevant && c.bIsBody &&
+                   c.bodyA != kInvalidSlot && c.bodyB != kInvalidSlot &&
+                   w.TypeSlot(c.bodyA) == BodyType::Dynamic &&
+                   w.TypeSlot(c.bodyB) == BodyType::Dynamic;
         }
 
         void ConstraintGraph::UpdateContacts(PhysicsWorld& w, Real dt)
@@ -1077,13 +1083,18 @@ namespace Manifold2D
                     }
                     else if (c.npState & kNpStarted)
                     {
-                        const std::uint32_t lo = c.bodyA < c.bodyB ? c.bodyA : c.bodyB;
-                        const std::uint32_t hi = c.bodyA < c.bodyB ? c.bodyB : c.bodyA;
-                        m_pendingMerges.push_back(BroadphasePair{ lo, hi });
+                        if (c.eventFlags & kEvContact) { w.PushContactBegin(c); }
+                        if (IsDynDynSolver(w, c))
+                        {
+                            const std::uint32_t lo = c.bodyA < c.bodyB ? c.bodyA : c.bodyB;
+                            const std::uint32_t hi = c.bodyA < c.bodyB ? c.bodyB : c.bodyA;
+                            m_pendingMerges.push_back(BroadphasePair{ lo, hi });
+                        }
                     }
                     else if (c.npState & kNpStopped)
                     {
-                        w.MarkSplitCandidate(w.IslandOf(c.bodyA));
+                        if (c.eventFlags & kEvContact) { w.PushContactEnd(c); }
+                        if (IsDynDynSolver(w, c)) { w.MarkSplitCandidate(w.IslandOf(c.bodyA)); }
                     }
                 });
             }
@@ -1529,11 +1540,20 @@ namespace Manifold2D
         // + DebugValidateBodyContacts) lives in IslandManager (decomp step 1 Task 3):
         // it is the split-linkage the island topology owns. ReleaseAndDestroyContact
         // is the graph-level teardown coordinator (decomp step 2 Task 3) -- it
-        // detaches the island adjacency (via w.m_islandMgr), releases the persistent
-        // color, and destroys the pool slot. Order is FROZEN (reads c before the
-        // pool frees it; the RemoveBody color-leak assert gates the pairing).
-        void ConstraintGraph::ReleaseAndDestroyContact(PhysicsWorld& w, std::uint32_t id, const Contact& c) noexcept
+        // emits a touching contact's End, detaches the island adjacency (via
+        // w.m_islandMgr), releases the persistent color, and destroys the pool
+        // slot. Order is FROZEN (the End and the detach read c before the pool
+        // frees it; the RemoveBody color-leak assert gates the pairing).
+        void ConstraintGraph::ReleaseAndDestroyContact(PhysicsWorld& w, std::uint32_t id, const Contact& c)
         {
+            // Destroy-time End (Box2D contact.c:354-364): a touching contact that
+            // reports, destroyed for any reason (RemoveBody, DropFixture,
+            // SetBodyFilter, fat-box separation), ends here. Read c before the pool
+            // frees the slot -- the frozen order below still holds.
+            if (c.touching && (c.eventFlags & kEvContact) != 0u)
+            {
+                w.PushContactEnd(c);
+            }
             w.m_islandMgr.DetachContactAdjacency(w, id, c); // reads c before the pool frees the slot
             ReleaseContactColor(w, id); // free the color while c still holds it
             m_contactPool.Destroy(id);

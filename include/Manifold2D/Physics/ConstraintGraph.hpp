@@ -111,11 +111,13 @@ namespace Manifold2D
             void DestroyContactsForFixture(PhysicsWorld& w, std::uint32_t fixtureSlot);
             void DestroyContactsForBody(PhysicsWorld& w, std::uint32_t bodySlot);
 
-            // The canonical pooled-contact teardown: detach island adjacency
-            // (via w.m_islandMgr) + release the persistent color (while c still
-            // holds it) + pool.Destroy. Order is FROZEN.
+            // The canonical pooled-contact teardown: a touching contact that
+            // reports emits its End (Box2D contact.c:354-364) before the island
+            // adjacency detach, the color release, and pool.Destroy. Order is
+            // FROZEN (the End and the detach both read c). Not noexcept:
+            // PushContactEnd may allocate.
             void ReleaseAndDestroyContact(PhysicsWorld& w, std::uint32_t id,
-                                          const Contact& c) noexcept;
+                                          const Contact& c);
 
             // ---- persistent incremental contact coloring (Phase C, Task 4;
             //      moved here in decomp step 2 Task 2) -------------------------

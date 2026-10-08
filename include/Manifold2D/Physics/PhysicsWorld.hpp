@@ -628,8 +628,9 @@ namespace Manifold2D
             void SetHitEventThreshold(Real threshold);
             void SetContactEventsRequireBoth(bool both) noexcept { m_contactEventsRequireBoth = both; }
 
-            // Empty until later tasks fill the arrays. Spans are valid until the next Step.
-            [[nodiscard]] ContactEvents GetContactEvents() const { return {}; }
+            // Begin/hit are this step's arrays; end is the buffer the previous flip
+            // published (Box2D world.c:807-810, :1515). Valid until the next Step.
+            [[nodiscard]] ContactEvents GetContactEvents() const noexcept;
             [[nodiscard]] SensorEvents  GetSensorEvents() const { return {}; }
 
             // Test seam: the pool contact's eventFlags, or 0xFF when no contact exists.
@@ -1331,6 +1332,12 @@ namespace Manifold2D
             // snapshot hook on SolverContext::traceHook. See StepTraced.
             void StepImpl(Real dt, StepTrace* trace);
 
+            // Contact begin/end writers. Gated only on m_eventsEnabled (the legacy
+            // ContactManager Disarm/Rearm path is separate and stays until M7).
+            // ConstraintGraph is a friend and calls these from the serial tail.
+            void PushContactBegin(const Contact& c);
+            void PushContactEnd(const Contact& c);
+
             // ---- per-fixture broadphase helpers (Phase 2, Task 1) -------------
             //
             // UpdateMoverProxies(b): refreshes residency and all fixture proxies in
@@ -1588,6 +1595,15 @@ namespace Manifold2D
             SpatialGrid m_residencyGrid{ Real(1) }; // MKS tile; TODO(map-integration): wire to the map's real tile size
 
             bool m_eventsEnabled = true;
+
+            // Contact event arrays (spec 2026-10-08 s6.1). Begins and hits are
+            // cleared at the start of each Step (Box2D world.c:710-712). Ends are
+            // double-buffered: m_endEventIndex names the buffer this step (and a
+            // destroy before the next step) writes; GetContactEvents reads the other.
+            std::vector<ContactBeginEvent> m_contactBeginEvents;
+            std::vector<ContactHitEvent>   m_contactHitEvents;
+            std::vector<ContactEndEvent>   m_contactEndEvents[2];
+            std::uint32_t                  m_endEventIndex = 0;
 
             // ---- dynamics config (P2.1 + P2.2) -----------------------------
             // Global gravity applied to awake Dynamic bodies in Step.

@@ -79,3 +79,71 @@ TEST_CASE("A sensor pair captures no contact or hit flags", "[physics][events]")
     const std::uint8_t f = w.DebugContactEventFlags(w.GetBodyFixture(s, 0), w.GetBodyFixture(o, 0));
     CHECK((f == 0xFF || f == 0u));       // either no pool contact or a non-solver one
 }
+
+TEST_CASE("A box landing on static ground begins once and ends when lifted", "[physics][events]")
+{
+    PhysicsWorld w{ WorldDef{} };
+    const BodyHandle g = AddGround(w);
+    const BodyHandle b = AddBox(w, Real(0), Real(-2));
+    EventLog log;
+    log.StepAndCollect(w, 120);
+    REQUIRE(log.begin.size() == 1);                 // dynamic-vs-static now reports (the old events skipped it)
+    CHECK(log.begin[0].bodyA == b);                 // canonical: A is the dynamic side (Contact.hpp:65)
+    CHECK(log.begin[0].bodyB == g);
+    CHECK(log.end.empty());
+    w.SetPosition(b, Vec2(Real(0), Real(-5)));      // teleport away
+    log.StepAndCollect(w, 2);
+    CHECK(log.end.size() == 1);
+}
+
+TEST_CASE("Two dynamic boxes report begin; kinematic-vs-static reports nothing", "[physics][events]")
+{
+    PhysicsWorld w{ WorldDef{} };
+    AddGround(w);
+    AddBox(w, Real(0), Real(-0.5));
+    AddBox(w, Real(0), Real(-1.6));
+    BodyDef k; k.type = BodyType::Kinematic; k.position = Vec2(Real(5), Real(-0.4));
+    k.shape = MakeAabb(Real(0.5), Real(0.5)); k.contactEvents = true;
+    w.AddBody(k);                                   // overlaps the ground: no solver contact in Box2D terms
+    EventLog log;
+    log.StepAndCollect(w, 90);
+    CHECK(log.begin.size() == 2);                   // box-ground, box-box; never kinematic-ground (A9)
+}
+
+TEST_CASE("Opting out on both fixtures silences the pair", "[physics][events]")
+{
+    PhysicsWorld w{ WorldDef{} };
+    AddGround(w, false);
+    AddBox(w, Real(0), Real(-2), false);
+    EventLog log;
+    log.StepAndCollect(w, 120);
+    CHECK(log.begin.empty());
+}
+
+TEST_CASE("Begin arrays are sorted by fixture pair", "[physics][events]")
+{
+    PhysicsWorld w{ WorldDef{} };
+    AddGround(w);
+    for (int i = 0; i < 6; ++i) AddBox(w, Real(-5 + 2 * i), Real(-0.49));   // all land in step 1
+    w.Step(kStep);
+    const ContactEvents c = w.GetContactEvents();
+    REQUIRE(c.begin.size() == 6);
+    for (std::size_t i = 1; i < c.begin.size(); ++i)
+        CHECK((FixtureLess(c.begin[i - 1].a, c.begin[i].a) ||
+               (c.begin[i - 1].a == c.begin[i].a && FixtureLess(c.begin[i - 1].b, c.begin[i].b))));
+}
+
+TEST_CASE("the world gate drops events without a burst on re-enable", "[physics][events]")
+{
+    PhysicsWorld w{ WorldDef{} };
+    AddGround(w);
+    AddBox(w, Real(0), Real(-2));
+    w.SetEventsEnabled(false);
+    EventLog log;
+    log.StepAndCollect(w, 120);                     // lands while gated
+    CHECK(log.begin.empty());
+    w.SetEventsEnabled(true);
+    log.StepAndCollect(w, 10);                      // still touching
+    CHECK(log.begin.empty());                       // no burst
+    CHECK(log.end.empty());                         // and no orphan End
+}
