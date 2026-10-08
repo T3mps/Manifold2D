@@ -214,7 +214,10 @@ TEST_CASE("GravityWell: a box rests on a segmented curved ground under radial gr
     }
     const Real at = kPi * Real(40) / Real(180);
     BodyDef d;
-    d.type = BodyType::Dynamic; d.shape = MakeAabb(Real(0.3), Real(0.3)); d.density = Real(1);
+    // (a polygon box, not MakeAabb: it must tilt to sit flat 40 degrees round the planet,
+    // and a dynamic AABB is fixedRotation by contract -- PhysicsWorld asserts it)
+    d.type = BodyType::Dynamic; d.density = Real(1);
+    d.shape = MakePolygon(std::vector<Vec2>{ Vec2(Real(-0.3), Real(-0.3)), Vec2(Real(0.3), Real(-0.3)), Vec2(Real(0.3), Real(0.3)), Vec2(Real(-0.3), Real(0.3)) });
     d.friction = Real(0.6);
     d.position = Vec2((R + Real(0.31)) * std::cos(at), (R + Real(0.31)) * std::sin(at));
     const BodyHandle box = w.AddBody(d);
