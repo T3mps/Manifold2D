@@ -241,39 +241,166 @@ TEST_CASE("A contact that separates by fat box while touching still ends", "[phy
 
 namespace
 {
-    // Twenty boxes, two rows, falling onto a ground for 240 steps. contactEvents
-    // and hitEvents are on (AddBox's 4th/5th args). The trace is the sorted event
-    // arrays, so a serial run and an MT run must match byte for byte (spec s6.3).
-    std::vector<std::uint32_t> RunEventTrace(Mosaic::IWorkScheduler* exec)
+    // 256 dynamics: SoftStep::BuildStages sizes body blocks at a minimum of 32
+    // awake bodies (SoftStep.cpp, kBodyMinBlock) and a target of 4*WorkerCount().
+    // ceil(256/32) = 8, so any executor with WorkerCount() > 1 gets multiple
+    // body blocks to steal. 20 boxes never crossed that threshold.
+    constexpr int kDynamicBoxes = 256;
+    constexpr int kColumns      = 64;   // 4 rows; the resting stack stays short
+    constexpr int kSteps        = 160;
+    constexpr int kSeparateAt   = 120;  // shift off the ground so contact Ends fire
+    constexpr int kBodyMinBlock = 32;   // SoftStep.cpp BuildStages
+
+    struct EventTrace
+    {
+        std::vector<std::uint32_t> words;
+        std::uint32_t contactBegin = 0;
+        std::uint32_t contactEnd   = 0;
+        std::uint32_t contactHit   = 0;
+        std::uint32_t sensorBegin  = 0;
+        std::uint32_t sensorEnd    = 0;
+    };
+
+    void PushRealBits(std::vector<std::uint32_t>& words, Real v)
+    {
+        static_assert(sizeof(Real) == sizeof(std::uint32_t));
+        words.push_back(std::bit_cast<std::uint32_t>(v));
+    }
+
+    void PushFixture(std::vector<std::uint32_t>& words, FixtureHandle h)
+    {
+        words.push_back(h.index);
+        words.push_back(h.generation);
+    }
+
+    void PushBody(std::vector<std::uint32_t>& words, BodyHandle h)
+    {
+        words.push_back(h.index);
+        words.push_back(h.generation);
+    }
+
+    // Declaration order from Events.hpp. The tag keeps the five arrays apart
+    // inside one word stream.
+    template <typename Event>
+    void PushPair(std::vector<std::uint32_t>& words, std::uint32_t tag, const Event& e)
+    {
+        words.push_back(tag);
+        PushFixture(words, e.a);
+        PushFixture(words, e.b);
+        PushBody(words, e.bodyA);
+        PushBody(words, e.bodyB);
+    }
+
+    template <typename Event>
+    void PushSensor(std::vector<std::uint32_t>& words, std::uint32_t tag, const Event& e)
+    {
+        words.push_back(tag);
+        PushFixture(words, e.sensor);
+        PushFixture(words, e.visitor);
+        PushBody(words, e.sensorBody);
+        PushBody(words, e.visitorBody);
+    }
+
+    void AppendStep(EventTrace& trace, const PhysicsWorld& w)
+    {
+        const ContactEvents c = w.GetContactEvents();
+        for (const ContactBeginEvent& e : c.begin)
+        {
+            PushPair(trace.words, 1u, e);
+            ++trace.contactBegin;
+        }
+        for (const ContactEndEvent& e : c.end)
+        {
+            PushPair(trace.words, 2u, e);
+            ++trace.contactEnd;
+        }
+        for (const ContactHitEvent& e : c.hit)
+        {
+            PushPair(trace.words, 3u, e);
+            PushRealBits(trace.words, e.point.x);
+            PushRealBits(trace.words, e.point.y);
+            PushRealBits(trace.words, e.normal.x);
+            PushRealBits(trace.words, e.normal.y);
+            PushRealBits(trace.words, e.approachSpeed);
+            ++trace.contactHit;
+        }
+        const SensorEvents s = w.GetSensorEvents();
+        for (const SensorBeginEvent& e : s.begin)
+        {
+            PushSensor(trace.words, 4u, e);
+            ++trace.sensorBegin;
+        }
+        for (const SensorEndEvent& e : s.end)
+        {
+            PushSensor(trace.words, 5u, e);
+            ++trace.sensorEnd;
+        }
+    }
+
+    void RequirePopulated(const EventTrace& trace)
+    {
+        REQUIRE(trace.contactBegin > 0u);
+        REQUIRE(trace.contactEnd > 0u);
+        REQUIRE(trace.contactHit > 0u);
+        REQUIRE(trace.sensorBegin > 0u);
+        REQUIRE(trace.sensorEnd > 0u);
+    }
+
+    // 64x4 grid of dynamic boxes dropped onto a wide ground, through three
+    // static sensor bands that sit below the spawn and above the resting
+    // stack. Restitution is 0, so a settled pair never separates: at
+    // kSeparateAt every box is shifted off the ground and the next steps
+    // deliver the contact Ends. nullptr keeps the world's serial executor.
+    EventTrace RunEventTrace(Mosaic::IWorkScheduler* exec)
     {
         PhysicsWorld w{ WorldDef{} };
-        w.SetExecutor(exec); // nullptr keeps the world's serial default
-        AddGround(w);
-        for (int i = 0; i < 20; ++i)
-            AddBox(w, Real(-5 + (i % 10)), Real(-2 - 1.1 * (i / 10)), true, true);
-        std::vector<std::uint32_t> trace;
-        for (int s = 0; s < 240; ++s)
+        w.SetExecutor(exec);
+
+        BodyDef ground;
+        ground.type          = BodyType::Static;
+        ground.position      = Vec2(Real(0), Real(0.5)); // top face at y = 0
+        ground.shape         = MakeAabb(Real(40), Real(0.5));
+        ground.contactEvents = true;
+        w.AddBody(ground);
+
+        // Bands the boxes fall through. Half-height 0.15. +Y is down, so these
+        // y values are above the ground and clear of both the spawn (bottoms
+        // at y=-7.5) and a 4-high rest stack (top face near y=-4).
+        for (const Real sy : { Real(-6.8f), Real(-6.0f), Real(-5.0f) })
         {
+            BodyDef band;
+            band.type         = BodyType::Static;
+            band.position     = Vec2(Real(0), sy);
+            band.shape        = MakeAabb(Real(40), Real(0.15f));
+            band.isSensor     = true;
+            band.sensorEvents = true;
+            w.AddBody(band);
+        }
+
+        std::vector<BodyHandle> boxes;
+        boxes.reserve(static_cast<std::size_t>(kDynamicBoxes));
+        for (int i = 0; i < kDynamicBoxes; ++i)
+        {
+            const int c = i % kColumns;
+            const int r = i / kColumns;
+            const Real x = (static_cast<Real>(c) - Real(31.5f)) * Real(1.05f);
+            const Real y = Real(-8) - static_cast<Real>(r) * Real(1.15f);
+            boxes.push_back(AddBox(w, x, y, /*contactEvents*/ true, /*hitEvents*/ true));
+        }
+
+        EventTrace trace;
+        for (int s = 0; s < kSteps; ++s)
+        {
+            if (s == kSeparateAt)
+            {
+                for (const BodyHandle h : boxes)
+                {
+                    const Vec2 p = w.Position(h);
+                    w.SetPosition(h, Vec2(p.x + Real(100), p.y));
+                }
+            }
             w.Step(kStep);
-            const ContactEvents c = w.GetContactEvents();
-            for (const auto& e : c.begin)
-            {
-                trace.push_back(1);
-                trace.push_back(e.a.index);
-                trace.push_back(e.b.index);
-            }
-            for (const auto& e : c.end)
-            {
-                trace.push_back(2);
-                trace.push_back(e.a.index);
-                trace.push_back(e.b.index);
-            }
-            for (const auto& e : c.hit)
-            {
-                trace.push_back(3);
-                trace.push_back(e.a.index);
-                trace.push_back(std::bit_cast<std::uint32_t>(static_cast<float>(e.approachSpeed)));
-            }
+            AppendStep(trace, w);
         }
         return trace;
     }
@@ -281,8 +408,10 @@ namespace
 
 TEST_CASE("Event arrays are byte-identical across runs", "[physics][events][determinism]")
 {
-    const auto run = [] { return RunEventTrace(nullptr); };
-    CHECK(run() == run());
+    const EventTrace a = RunEventTrace(nullptr);
+    const EventTrace b = RunEventTrace(nullptr);
+    RequirePopulated(a);
+    CHECK(a.words == b.words);
 }
 
 TEST_CASE("Event arrays are byte-identical serial vs MT", "[physics][events][determinism][solvermt]")
@@ -290,5 +419,20 @@ TEST_CASE("Event arrays are byte-identical serial vs MT", "[physics][events][det
     Mosaic::SerialWorkScheduler serial;
     const std::uint32_t hw = std::thread::hardware_concurrency();
     Manifold2D::Testing::TestWorkScheduler many(hw > 1u ? hw : 2u);
-    CHECK(RunEventTrace(&serial) == RunEventTrace(&many));
+
+    // Same sizing as SoftStep::BuildStages. There is no runtime counter for
+    // blocks stolen; WorkerCount() is the hook SolverMtInvarianceTest uses.
+    const int maxBodyBlocks = (kDynamicBoxes + kBodyMinBlock - 1) / kBodyMinBlock;
+    const int targetBlocks  = 4 * static_cast<int>(many.WorkerCount());
+    const int bodyBlocks    = targetBlocks < maxBodyBlocks ? targetBlocks : maxBodyBlocks;
+    INFO("workers=" << many.WorkerCount() << " dynamics=" << kDynamicBoxes
+         << " bodyMinBlock=" << kBodyMinBlock << " bodyBlocks=" << bodyBlocks);
+    REQUIRE(many.WorkerCount() > 1u);
+    REQUIRE(bodyBlocks > 1);
+
+    const EventTrace serialTrace = RunEventTrace(&serial);
+    const EventTrace mtTrace     = RunEventTrace(&many);
+    RequirePopulated(serialTrace);
+    RequirePopulated(mtTrace);
+    CHECK(serialTrace.words == mtTrace.words);
 }
