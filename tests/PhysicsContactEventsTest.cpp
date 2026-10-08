@@ -23,6 +23,40 @@ TEST_CASE("Event flags default off and are captured when a contact is created", 
     CHECK(flags == (kEvContact | kEvHit)); // either-fixture rule (Box2D contact.c:253, :535)
 }
 
+TEST_CASE("A flag change leaves an existing contact's bits alone and applies to the next contact",
+          "[physics][events]")
+{
+    // Zero-g so the authored overlaps stay put (spec s6.1 / amendment A3:
+    // contact and hit bits are fixed when the pool contact is created).
+    WorldDef wd;
+    wd.gravityX = Real(0);
+    wd.gravityY = Real(0);
+    PhysicsWorld w{ wd };
+
+    const BodyHandle g = AddGround(w, /*contactEvents*/ false);
+    const BodyHandle b = AddBox(w, Real(0), Real(-0.49), /*contactEvents*/ true, /*hit*/ true);
+    w.Step(kStep);
+
+    const FixtureHandle bf = w.GetBodyFixture(b, 0);
+    const FixtureHandle gf = w.GetBodyFixture(g, 0);
+    REQUIRE(w.DebugContactEventFlags(bf, gf) == (kEvContact | kEvHit));
+
+    // Ground never opted in, so a per-step recompute would drop kEvContact.
+    w.SetFixtureEvents(bf, /*contact*/ false, /*sensor*/ false, /*hit*/ true);
+    w.Step(kStep);
+    CHECK(w.DebugContactEventFlags(bf, gf) == (kEvContact | kEvHit));
+
+    // New box overlaps b only, and opts out of both. The fresh pair must take
+    // b's updated bits (hit, no contact), not the bits captured for b-ground.
+    const BodyHandle b2 = AddBox(w, Real(0), Real(-1.4),
+                                 /*contactEvents*/ false, /*hit*/ false, /*sensor*/ false);
+    w.Step(kStep);
+    const std::uint8_t fresh = w.DebugContactEventFlags(bf, w.GetBodyFixture(b2, 0));
+    REQUIRE(fresh != 0xFF);
+    CHECK(fresh == kEvHit);
+    CHECK(w.DebugContactEventFlags(bf, gf) == (kEvContact | kEvHit));
+}
+
 TEST_CASE("contactEventsRequireBoth needs both fixtures; hit stays either", "[physics][events]")
 {
     WorldDef wd; wd.contactEventsRequireBoth = true;
