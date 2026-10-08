@@ -200,8 +200,8 @@ TEST_CASE("physics-v2 T5 (b): rotated box contact resolves penetration",
     // We explicitly test GenerateContacts by checking the contact constraint
     // generated for a box overlapping a floor at a known angle.
     //
-    // Use a minimal world: one step to generate contacts without solving.
-    // We intercept contacts via the OnContact listener.
+    // Use a minimal world: one step generates the contact and the solver
+    // pushes the box. The observable is the position change.
     PhysicsWorld world = MakeGravityWorld();
 
     // Floor at y=10. /10 from px 100.
@@ -299,13 +299,8 @@ TEST_CASE("physics-v2 T5 (c): fixedRotation body does not rotate under off-cente
 //     single-fixture body of the same position (the circle fixture engages
 //     the floor, pushing the body up further).
 //
-// NOTE: In this engine, dynamic-vs-static BODY contact events do NOT flow
-// through the ContactManager listener (that is faithful to ContactManager.lua
-// line 150: "== KINEMATIC" guard). The ContactManager is for kinematic-vs-static
-// and mover-mover event triggers. Dynamic-vs-static response lives in the SOLVER
-// (GenerateContacts feeds the ContactConstraint pool; the solver resolves it).
-//
-// So we verify compound detection through SOLVER BEHAVIOR:
+// Compound detection is verified through SOLVER BEHAVIOR (the contact
+// constraint feed), not through the event arrays:
 //   - A single-fixture body dropped from the same position settles at height Y1.
 //   - A compound body (box + circle offset to the right) dropped from the same
 //     position has MORE contact area against the floor -> it settles in a

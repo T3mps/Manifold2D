@@ -15,8 +15,10 @@
 // == Circle/Capsule narrow ==             | ~161-220 | PhysicsSpecializedTest.cpp
 // == GJK / conservative advance ==        | ~221-280 | PhysicsGjkTest.cpp
 // == PhysicsWorld core ==                 | ~281-337 | PhysicsWorldTest.cpp
-// == ContactManager events ==             | ~339-379 | PhysicsWorldTest.cpp
-// == event gating ==                      | ~381-418 | PhysicsWorldTest.cpp
+// == contact / sensor events ==           | ~339-379 | PhysicsWorldTest.cpp
+// == event gating ==                      | ~381-418 | PhysicsContactEventsTest.cpp
+//                                         |          |   (world gate only; per-body
+//                                         |          |   gate removed, spec s6.5)
 // == Raycast / queryAABB / overlapShape   |
 //    / shapeCast / lineOfSight ==         | ~420-556 | PhysicsQueriesTest.cpp
 // == CharacterController slide ==         | ~558-650 | PhysicsCharacterTest.cpp
@@ -44,8 +46,8 @@
 //   * Bullet / speculative CCD clamp (Phase 3).
 //   * The "gc audit" block is Lua-GC-specific; it has no C++ analogue. Steady-
 //     state allocation is instead contractually guaranteed by the PhysicsWorld
-//     doc comment (SoA vectors only grow, broadphase pools nodes, ContactManager
-//     reuses pair map + scratch; no per-Step heap after warmup).
+//     doc comment (SoA vectors only grow, broadphase pools nodes, event
+//     buffers reuse capacity; no per-Step heap after warmup).
 //
 // =============================================================================
 // THIS FILE: kinematic determinism replay (P1.11 gate)
@@ -58,7 +60,7 @@
 //   * Multiple kinematic movers with scripted per-step velocities.
 //   * A TileGrid (GridPassability, all-solid floor row) as tile statics.
 //   * Static body obstacles.
-//   * ContactManager hooked (events generated deterministically).
+//   * Event arrays are read each step and kept out of the hash.
 //   * Per-step state accumulation into a 64-bit hash:
 //       hash = (hash * 31 + trunc(x * 1000) + trunc(y * 1000) * 7) % 2^48
 //     mirroring the harness formula verbatim.
@@ -106,8 +108,8 @@ namespace
     // a solid left-column barrier, all other cells open. The TileGrid derived
     // from it produces tile spans that kinematic movers bump into when driven
     // hard against the bottom or left edge. The presence of tile statics raises
-    // the complexity of the determinism proof (static candidate queries fire per
-    // Step for ContactManager).
+    // the complexity of the determinism proof (static candidate queries fire
+    // per Step).
     GridPassability MakeGrid()
     {
         constexpr int W = 16;
@@ -146,8 +148,8 @@ namespace
     //     that change every 60 steps (emulating the harness's hand-cranked loop).
     //   * One static obstacle body mid-scene (a tile alternative path is the
     //     TileGrid floor above; this adds body-vs-body contact).
-    //   * ContactManager hooked to count events (unused for the hash, but exercises
-    //     the event path deterministically).
+    //   * Event arrays are read each step and discarded (the hash is positions
+    //     only; the read must not affect them).
     //   * Hash accumulates positions of KINEMATIC movers only, steps 1..240.
     std::uint64_t RunScene(const GridPassability& grid, BroadphaseKind bp)
     {
@@ -157,9 +159,8 @@ namespace
 
         PhysicsWorld w(MakeDef(grid, bp));
 
-        // Hook events (determinism proof: the listener must not affect positions).
+        // Read the event arrays and discard them. Positions are the hash.
         int eventCount = 0;
-        w.OnContact([&eventCount](const ContactEvent&) { ++eventCount; });
 
         // A single static obstacle body at cell (8,8) center = (8.5, 8.5).
         {
@@ -221,6 +222,8 @@ namespace
                 w.SetVelocity(movers[i], kPhases[phase][i]);
 
             w.Step(kDt);
+            eventCount += static_cast<int>(w.GetContactEvents().begin.size()
+                                            + w.GetSensorEvents().begin.size());
 
             // Accumulate hash over kinematic body positions.
             for (int i = 0; i < 4; ++i)

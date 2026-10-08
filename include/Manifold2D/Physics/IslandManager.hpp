@@ -14,10 +14,10 @@
 //     persistent contact coloring -- a determinism tripwire. "Behavior over
 //     shared hot SoA -> keep flat" (the data-oriented design constraint).
 //
-// DELEGATION: like ContactManager, IslandManager owns its state outright and takes
+// DELEGATION: IslandManager owns its state outright and takes
 // PhysicsWorld& per method to reach the flat body/fixture/contact SoA + the
-// awake-set MECHANISM (AddToAwakeSet) it does not own. Unlike ContactManager's
-// narrow public "port seam", SplitIsland/WakeIsland need intimate world state (the
+// awake-set MECHANISM (AddToAwakeSet) it does not own. SplitIsland/WakeIsland
+// need intimate world state (the
 // contact pool + joint edges + the awake flag/timer), so PhysicsWorld befriends
 // IslandManager -- the SAME trust boundary this code had when it lived inside the
 // world. This keeps the extraction a verbatim, byte-identity-preserving move

@@ -134,12 +134,6 @@ namespace Manifold2D
                 return m_world->IsSensor(m_handle);
             }
 
-            // Per-body event gate (ports Body:setEventsEnabled).
-            void SetEventsEnabled(bool on) noexcept
-            {
-                if (m_world) m_world->SetBodyEvents(m_handle, on);
-            }
-
         private:
             PhysicsWorld* m_world  = nullptr;
             BodyHandle    m_handle{};

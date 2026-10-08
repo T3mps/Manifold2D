@@ -1,8 +1,13 @@
 // PhysicsContactEventsTest.cpp
 // [physics][events]: contact begin/end arrays (spec 2026-10-08 s6.1),
 // including destroy-time Ends (RemoveBody, DropFixture, filter, fat box).
+#include <bit>
+#include <cstdint>
+#include <thread>
+
 #include <catch2/catch_test_macros.hpp>
 #include "PhysicsEventTestHelpers.hpp"
+#include "Support/TestWorkScheduler.hpp"
 
 using namespace EventTest;
 
@@ -232,4 +237,58 @@ TEST_CASE("A contact that separates by fat box while touching still ends", "[phy
     w.SetPosition(b, Vec2(Real(0), Real(-50)));     // far beyond the fat AABB in one move
     EventLog log; log.StepAndCollect(w, 1);
     CHECK(log.end.size() == 1);
+}
+
+namespace
+{
+    // Twenty boxes, two rows, falling onto a ground for 240 steps. contactEvents
+    // and hitEvents are on (AddBox's 4th/5th args). The trace is the sorted event
+    // arrays, so a serial run and an MT run must match byte for byte (spec s6.3).
+    std::vector<std::uint32_t> RunEventTrace(Mosaic::IWorkScheduler* exec)
+    {
+        PhysicsWorld w{ WorldDef{} };
+        w.SetExecutor(exec); // nullptr keeps the world's serial default
+        AddGround(w);
+        for (int i = 0; i < 20; ++i)
+            AddBox(w, Real(-5 + (i % 10)), Real(-2 - 1.1 * (i / 10)), true, true);
+        std::vector<std::uint32_t> trace;
+        for (int s = 0; s < 240; ++s)
+        {
+            w.Step(kStep);
+            const ContactEvents c = w.GetContactEvents();
+            for (const auto& e : c.begin)
+            {
+                trace.push_back(1);
+                trace.push_back(e.a.index);
+                trace.push_back(e.b.index);
+            }
+            for (const auto& e : c.end)
+            {
+                trace.push_back(2);
+                trace.push_back(e.a.index);
+                trace.push_back(e.b.index);
+            }
+            for (const auto& e : c.hit)
+            {
+                trace.push_back(3);
+                trace.push_back(e.a.index);
+                trace.push_back(std::bit_cast<std::uint32_t>(static_cast<float>(e.approachSpeed)));
+            }
+        }
+        return trace;
+    }
+}
+
+TEST_CASE("Event arrays are byte-identical across runs", "[physics][events][determinism]")
+{
+    const auto run = [] { return RunEventTrace(nullptr); };
+    CHECK(run() == run());
+}
+
+TEST_CASE("Event arrays are byte-identical serial vs MT", "[physics][events][determinism][solvermt]")
+{
+    Mosaic::SerialWorkScheduler serial;
+    const std::uint32_t hw = std::thread::hardware_concurrency();
+    Manifold2D::Testing::TestWorkScheduler many(hw > 1u ? hw : 2u);
+    CHECK(RunEventTrace(&serial) == RunEventTrace(&many));
 }

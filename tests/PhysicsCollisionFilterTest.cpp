@@ -23,7 +23,6 @@
 #include <Manifold2D/Physics/Shapes.hpp>
 #include <Manifold2D/Physics/Body.hpp>
 #include <Manifold2D/Physics/PhysicsWorld.hpp>
-#include <Manifold2D/Physics/ContactManager.hpp>
 
 using namespace Manifold2D::Physics;
 
@@ -34,15 +33,17 @@ namespace
     // Helper: add a Dynamic circle at `pos` with explicit filter bits.
     // The BodyDef.categoryBits / maskBits flow through to the auto-fixture.
     BodyHandle AddFiltered(PhysicsWorld& w, Vec2 pos, Real r,
-                           std::uint32_t catBits, std::uint32_t maskBits)
+                           std::uint32_t catBits, std::uint32_t maskBits,
+                           bool contactEvents = false)
     {
         BodyDef d;
-        d.type         = BodyType::Dynamic;
-        d.position     = pos;
-        d.shape        = MakeCircle(r);
-        d.density      = Real(1);
-        d.categoryBits = catBits;
-        d.maskBits     = maskBits;
+        d.type          = BodyType::Dynamic;
+        d.position      = pos;
+        d.shape         = MakeCircle(r);
+        d.density       = Real(1);
+        d.categoryBits  = catBits;
+        d.maskBits      = maskBits;
+        d.contactEvents = contactEvents;
         return w.AddBody(d);
     }
 } // namespace
@@ -63,22 +64,16 @@ TEST_CASE("Collision filter: disjoint category/mask pair never creates a contact
 
     // Place A above B, overlapping (radius=1 each, centers 0.8 apart -> overlap).
     // Without filtering they would push apart; with filtering they pass through.
-    BodyHandle bA = AddFiltered(w, Vec2(Real(0), Real(0)),  Real(1), 0x0002u, 0x0002u);
-    BodyHandle bB = AddFiltered(w, Vec2(Real(0), Real(0.8)),  Real(1), 0x0004u, 0x0004u);
+    // contactEvents on, so a contact that escaped the filter would Begin.
+    BodyHandle bA = AddFiltered(w, Vec2(Real(0), Real(0)),  Real(1), 0x0002u, 0x0002u, true);
+    BodyHandle bB = AddFiltered(w, Vec2(Real(0), Real(0.8)),  Real(1), 0x0004u, 0x0004u, true);
 
     int beginCount = 0;
-    w.OnContact([&](const ContactEvent& ev)
-    {
-        if (ev.type == ContactEvent::Type::Begin)
-        {
-            ++beginCount;
-        }
-    });
-
     // Step enough frames for any real collision to manifest.
     for (int i = 0; i < 10; ++i)
     {
         w.Step(kStep);
+        beginCount += static_cast<int>(w.GetContactEvents().begin.size());
     }
 
     // No contact should have been created (filter gate rejects at TryCreateContact).

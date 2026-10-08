@@ -4,8 +4,8 @@
 // See PhysicsWorld.hpp for the contract + the PORT BOUNDARY (what P1.8 ports
 // vs what P2/P3 add). This TU implements Create/AddBody/RemoveBody/IsValid,
 // the kinematic Step (prev snapshot + kinematic integration + broadphase
-// update, then ContactManager::Step), QueryAABB, the two-granularity event
-// gating glue (SetBodyEvents / SetEventsEnabled), and _staticCandidates.
+// update, then the event arrays), QueryAABB, the world event gate
+// (SetEventsEnabled), and _staticCandidates.
 //
 // PRESENTATION-FREE + C++20-clean: Geometry::Vec2 + std + sibling Physics headers only.
 
@@ -40,8 +40,8 @@ namespace Manifold2D
     {
 
         // Compose a fixture's WORLD transform = body transform ∘ fixture local
-        // transform.  SlotAabb, GenerateContacts' FixtureWorldXf lambda,
-        // SlotsOverlap, the fixture-aware queries, and BulletSweep all delegate
+        // transform.  SlotAabb, the contact narrowphase,
+        // the fixture-aware queries, and BulletSweep all delegate
         // here so the rotate+offset formula lives in exactly ONE place. Promoted
         // from a TU-local static to a static member (T7) so Queries.cpp (a
         // separate TU) can compose fixture world transforms too.
@@ -206,7 +206,6 @@ namespace Manifold2D
             m_velX.resize(next);
             m_velY.resize(next);
             m_btype.resize(next);
-            m_evtOn.resize(next);
             m_alive.resize(next);
             m_sensor.resize(next);
             m_gen.resize(next, 0u); // gen kept zero-filled (live slots start at 1)
@@ -1011,7 +1010,6 @@ namespace Manifold2D
             m_velX[idx]  = Real(0);
             m_velY[idx]  = Real(0);
             m_btype[idx] = static_cast<std::uint8_t>(def.type);
-            m_evtOn[idx] = def.eventsEnabled ? std::uint8_t(1) : std::uint8_t(0);
             m_sensor[idx] = def.isSensor ? std::uint8_t(1) : std::uint8_t(0);
             m_alive[idx]  = 1;
             // Bump generation (live slots start at 1; bump on BOTH add + remove
@@ -1256,7 +1254,6 @@ namespace Manifold2D
                 m_residencyGrid.Remove(idx);
             }
 
-            m_contacts.DropBody(idx);
             m_solver->DropBody(idx); // drop warm-start state for the recycled slot
 
             // Immediately destroy every persistent-pool contact referencing this
@@ -1910,53 +1907,12 @@ namespace Manifold2D
             return IsValid(h) && m_sensor[h.index] != 0;
         }
 
-        void PhysicsWorld::OnContact(ContactManager::Listener fn)
-        {
-            m_contacts.SetListener(std::move(fn));
-        }
-
-        void PhysicsWorld::SetBodyEvents(BodyHandle h, bool on)
-        {
-            if (!IsValid(h))
-            {
-                MOSAIC_LOG_WARN("operation on a stale/invalid BodyHandle ignored");
-                return;
-            }
-            const std::uint32_t i = h.index;
-            const bool was = m_evtOn[i] != 0;
-            m_evtOn[i] = on ? std::uint8_t(1) : std::uint8_t(0);
-            // true->false: Disarm (drop, no synthetic end). false->true: Rearm
-            // (fresh begin for overlapping). Ports _setBodyEvents.
-            if (was && !on)
-            {
-                m_contacts.Disarm(i);
-            }
-            else if (on && !was)
-            {
-                m_contacts.Rearm(*this, i);
-            }
-        }
-
         void PhysicsWorld::SetEventsEnabled(bool on)
         {
-            if (m_eventsEnabled == on)
-            {
-                return;
-            }
-            m_eventsEnabled = on;
-            // Begin events gate on m_eventsEnabled. An End is delivered iff its
-            // Begin was (Contact::beginReported, R10; SensorOverlap::beginReported,
-            // R12), even after the gate closes.
-            // Legacy listener: on->off Disarm all, off->on Rearm all overlapping.
-            // Ports setEventsEnabled. Stays until M7 removes ContactManager.
-            if (on)
-            {
-                m_contacts.Rearm(*this);
-            }
-            else
-            {
-                m_contacts.Disarm();
-            }
+            // Plain world gate (spec s6.2). Begin and hit pushes read it.
+            // An End is delivered iff its Begin was (R10, R12), even after the
+            // gate closes. Turning it back on does not emit a burst.
+            m_eventGate = on;
         }
 
         void PhysicsWorld::Step(Real dt)
@@ -1996,8 +1952,8 @@ namespace Manifold2D
             //            this is the discrete backup, primarily for kinematics.)
             //            CCD runs after the solver commits positions, before
             //            island/events.
-            //   stage 5: island sleep bookkeeping            (P2.4 -- deferred)
-            //   stage 6: contacts:step (events + gating + deferred flush)
+            //   stage 5: island sleep bookkeeping            (P2.4)
+            //   stage 6: contact / hit / sensor event arrays (spec s6)
             //
             // Free-fall parity: with NO contacts the solver's sub-step loop is a
             // pure semi-implicit integrate (gravity per sub-step, position per
@@ -2008,7 +1964,7 @@ namespace Manifold2D
 
             // Begin/hit arrays are this step's only (Box2D world.c:710-712).
             // End buffers stay: this step writes m_contactEndEvents[m_endEventIndex]
-            // and m_sensorEndEvents[m_endEventIndex], and stage 6b flips that
+            // and m_sensorEndEvents[m_endEventIndex], and stage 6 flips that
             // buffer into view.
             m_contactBeginEvents.clear();
             m_contactHitEvents.clear();
@@ -2425,20 +2381,7 @@ namespace Manifold2D
                 m_islandMgr.UpdateSleep(*this, dt);
             }
 
-            // ---- stage 6: events + gating + deferred flush -------------------
-            // Events-as-byproduct (collision-rebuild Phase 4): the graph derives
-            // the touched EVENT body-pairs from the persistent pool (deduped,
-            // sorted, exact-overlap semantics -- ConstraintGraph::
-            // CollectTouchedEventPairs, decomp step 2 Task 3), then the buffer is
-            // handed to the ContactManager. m_touchedEventPairs stays world-owned
-            // (the stage-output hand-off rule, like m_contactConstraints).
-            {
-                ARCANE_STEPPROF_SCOPE(Events);
-                m_graph.CollectTouchedEventPairs(m_touchedEventPairs);
-                m_contacts.Step(*this, m_touchedEventPairs);
-            }
-
-            // ---- stage 6b: event arrays (spec 2026-10-08 s6) -----------------
+            // ---- stage 6: event arrays (spec 2026-10-08 s6) -------------------
             // Hits, then the sensor pass (overlap state updates even when the
             // world gate is off), then sort for determinism (s6.3), then flip
             // the end buffers exactly as Box2D world.c:807-810: the buffer this
@@ -2460,8 +2403,8 @@ namespace Manifold2D
                 // constraint point p (ConstraintGraph.cpp:1243-1261).
                 // WritebackImpulses writes the impulse back by that same index
                 // (ConstraintGraph.cpp:1378-1383), so p indexes both. Gated on
-                // m_eventsEnabled at push time; hits are not begin/end pairs (R10).
-                if (m_eventsEnabled)
+                // m_eventGate at push time; hits are not begin/end pairs (R10).
+                if (m_eventGate)
                 {
                     for (const ContactConstraint& cc : m_contactConstraints)
                     {
@@ -2492,7 +2435,7 @@ namespace Manifold2D
                 }
 
                 // Sensor pass writes no simulation state. Begin pushes gate on
-                // m_eventsEnabled; Ends follow SensorOverlap::beginReported (R12).
+                // m_eventGate; Ends follow SensorOverlap::beginReported (R12).
                 // Overlap memory always updates.
                 RunSensorPass();
 
@@ -2519,7 +2462,7 @@ namespace Manifold2D
 
         void PhysicsWorld::PushContactBegin(Contact& c)
         {
-            if (!m_eventsEnabled) return;
+            if (!m_eventGate) return;
             m_contactBeginEvents.push_back(ContactBeginEvent{ c.a, c.b,
                 BodyHandle{ c.bodyA, c.genA }, BodyHandle{ c.bodyB, c.genB } });
             c.beginReported = true; // R10: an End is delivered iff this Begin was
@@ -2551,7 +2494,7 @@ namespace Manifold2D
             // R12: record delivery on the overlap RunSensorPass keeps (in `now`,
             // then swapped into m_sensorState). A closed gate drops the push and
             // leaves the bit clear, so a later End is not emitted.
-            if (!m_eventsEnabled) return;
+            if (!m_eventGate) return;
             m_sensorBeginEvents.push_back(SensorBeginEvent{
                 sensor, overlap.visitor, sensorBody, overlap.visitorBody });
             overlap.beginReported = true;
@@ -3063,112 +3006,6 @@ namespace Manifold2D
             }
         }
 
-        bool PhysicsWorld::SlotsOverlap(std::uint32_t a, std::uint32_t b) const
-        {
-            // T7 Part A: rotation + fixture-aware overlap for the ContactManager
-            // (events / re-arm). Iterate every fixture of body a against every
-            // fixture of body b, compose each fixture's world Transform, and run
-            // the unified rotation-aware Collide; true on the FIRST fixture-pair
-            // with a contact point. Mirrors GenerateContacts' fixture-pair flow
-            // but: (1) does NOT skip sensor fixtures (event gating must detect
-            // sensor overlaps; sensor-ness is applied later in Emit), and (2)
-            // uses speculativeMargin 0 (exact overlap only -- no speculative gap),
-            // matching the old CollideShapes(..., 0) event-overlap semantics.
-            //
-            // A body with NO fixtures falls back to its legacy single shape at the
-            // real body angle (mirrors the GenerateContacts single-shape fallback).
-            //
-            // The per-iteration `m_fxGen[fi] == 0u` guard below is DEFENSIVE ONLY:
-            // DropFixture swap-pops dead slots out of m_bodyFixtures, so a
-            // non-empty-but-all-dead fixture list is not normally reachable. The
-            // legacy single-shape fallback here applies only to the genuinely
-            // fixtureless case (fxA/fxB == nullptr). This intentionally diverges
-            // from SlotAabb, which ALSO falls back to the single shape when a
-            // body's fixture list is non-empty but every slot is dead -- harmless
-            // because that state is unreachable in practice (documented so the
-            // divergence reads as intentional, not an oversight).
-            const Vec2 posA(m_posX[a], m_posY[a]);
-            const Vec2 posB(m_posX[b], m_posY[b]);
-            const Real angA = m_angle[a];
-            const Real angB = m_angle[b];
-
-            const std::vector<std::uint32_t>* fxA =
-                (a < m_bodyFixtures.size() && !m_bodyFixtures[a].empty())
-                    ? &m_bodyFixtures[a] : nullptr;
-            const std::vector<std::uint32_t>* fxB =
-                (b < m_bodyFixtures.size() && !m_bodyFixtures[b].empty())
-                    ? &m_bodyFixtures[b] : nullptr;
-
-            // Compose the world transform of a single fixture slot for body whose
-            // pos/angle are known.
-            auto fxXf = [&](Vec2 bodyPos, Real bodyAngle,
-                            std::uint32_t fi) -> Transform
-            {
-                return ComposeFixtureXf(
-                    bodyPos, bodyAngle,
-                    Vec2(m_fxLocalPosX[fi], m_fxLocalPosY[fi]),
-                    m_fxLocalAngle[fi]);
-            };
-
-            // Resolve each body's (shape, xf) test list into a small fixed-size
-            // walk. Rather than build temporaries, branch on the four fallback
-            // combinations (both-fixtured / a-only / b-only / neither).
-            if (fxA != nullptr && fxB != nullptr)
-            {
-                for (const std::uint32_t fa : *fxA)
-                {
-                    if (fa >= m_fxCount || m_fxGen[fa] == 0u) { continue; }
-                    const Transform xfA = fxXf(posA, angA, fa);
-                    for (const std::uint32_t fb : *fxB)
-                    {
-                        if (fb >= m_fxCount || m_fxGen[fb] == 0u) { continue; }
-                        const Transform xfB = fxXf(posB, angB, fb);
-                        if (Collide(m_fxShape[fa], xfA,
-                                    m_fxShape[fb], xfB, Real(0)).pointCount > 0)
-                        {
-                            return true;
-                        }
-                    }
-                }
-                return false;
-            }
-            if (fxA != nullptr)
-            {
-                const Transform xfB{ posB, angB };
-                for (const std::uint32_t fa : *fxA)
-                {
-                    if (fa >= m_fxCount || m_fxGen[fa] == 0u) { continue; }
-                    const Transform xfA = fxXf(posA, angA, fa);
-                    if (Collide(m_fxShape[fa], xfA,
-                                m_shape[b], xfB, Real(0)).pointCount > 0)
-                    {
-                        return true;
-                    }
-                }
-                return false;
-            }
-            if (fxB != nullptr)
-            {
-                const Transform xfA{ posA, angA };
-                for (const std::uint32_t fb : *fxB)
-                {
-                    if (fb >= m_fxCount || m_fxGen[fb] == 0u) { continue; }
-                    const Transform xfB = fxXf(posB, angB, fb);
-                    if (Collide(m_shape[a], xfA,
-                                m_fxShape[fb], xfB, Real(0)).pointCount > 0)
-                    {
-                        return true;
-                    }
-                }
-                return false;
-            }
-            // Neither body has fixtures: legacy single-shape vs single-shape at
-            // the real angles.
-            const Transform xfA{ posA, angA };
-            const Transform xfB{ posB, angB };
-            return Collide(m_shape[a], xfA, m_shape[b], xfB, Real(0)).pointCount > 0;
-        }
-
         // ---- pull API for debug draw / inspection (P3.6) -------------------
 
         void PhysicsWorld::GetBodyContacts(BodyHandle h, std::vector<BodyContact>& out) const
@@ -3196,7 +3033,7 @@ namespace Manifold2D
             Mosaic::FunctionRef<void(std::uint32_t, std::uint32_t)> fn) const
         {
             // Every touching body-to-body pool contact, ascending id (spec s6.5).
-            // Replaces the ContactManager begun-pair walk; includes dyn-static now.
+            // Includes dynamic-vs-static.
             m_graph.ForEachPoolContact([&](std::uint32_t, const Contact& c)
             {
                 if (c.bIsBody && c.touching && c.bodyB != kInvalidSlot) fn(c.bodyA, c.bodyB);

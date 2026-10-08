@@ -470,16 +470,14 @@ namespace Manifold2D
             const bool sensorB = (w.m_sensor[ib] != 0) || (w.m_fxSensor[fib] != 0u);
             const bool solverRelevant = (da || db) && !sensorA && !sensorB;
 
-            // EVENT RELEVANCE (Phase 4, Task 2): events fire for every pooled
-            // body-pair EXCEPT dynamic-vs-static-body (the design's explicit
-            // exclusion -- the solver owns dynamic-vs-static response; events are
-            // gameplay triggers). A static body is `TypeSlot == Static`; the only
-            // created pairs are mover-mover, dynamic-static, kinematic-static (tiles
-            // never reach the pool), so this filter leaves mover-mover (sensors +
-            // kinematic-kinematic included) + kinematic-static event-relevant and
-            // excludes ONLY dynamic-static. Uses the ORIENTED (ia, ib) types so it
-            // reads symmetrically; a/b vs ia/ib is identical (orientation only swaps
-            // the two slots, not their type set).
+            // eventRelevant (Phase 4, Task 2), kept for the pool (spec s6.5).
+            // True for every pooled body-pair except dynamic-vs-static: mover-mover
+            // (sensors and kinematic-kinematic included) and kinematic-static.
+            // Tiles never reach the pool. UpdateOneContact uses it to keep
+            // refreshing event-only pairs while both bodies sleep. Contact-event
+            // reporting is eventFlags below, not this bit. Uses the ORIENTED
+            // (ia, ib) types so it reads symmetrically; a/b vs ia/ib is identical
+            // (orientation only swaps the two slots, not their type set).
             const bool aStatic =
                 static_cast<BodyType>(w.m_btype[ia]) == BodyType::Static;
             const bool bStatic =
@@ -952,9 +950,8 @@ namespace Manifold2D
             //     solver-relevant. Static bodies are NOT in the mover broadphase and
             //     the dynamic-driven static-candidate loop above only covers DYNAMIC
             //     bodies, so kinematic-vs-static pairs are created here by iterating
-            //     StaticList() per alive Kinematic body -- MIRRORING the old
-            //     ContactManager::Step kinematic-static loop (StaticList, AABB-reject)
-            //     so the create order is index-deterministic. TryCreateContact tags
+            //     StaticList() per alive Kinematic body, index-ordered, with an
+            //     AABB reject before the per-fixture pairing. TryCreateContact tags
             //     these solverRelevant == false (no dynamic body), so the solver feed
             //     is unchanged; the touch-state still drives the contact's manifold +
             //     `touching` in the update pass below for the event derivation (Task 2).
@@ -985,8 +982,7 @@ namespace Manifold2D
                         {
                             continue;
                         }
-                        // Cheap body-union AABB reject before the per-fixture pairing
-                        // (mirrors the old ContactManager AABB pre-filter).
+                        // Cheap body-union AABB reject before the per-fixture pairing.
                         if (!AabbOverlap(kinBox, w.SlotAabb(idx)))
                         {
                             continue;
@@ -1100,7 +1096,7 @@ namespace Manifold2D
             }
 
             // ---- apply queued island merges in a canonical order ----------------
-            // Sort by (min,max) body slot (mirrors the m_touchedEventPairs sort) so
+            // Sort by (min,max) body slot so
             // the merge sequence is run-twice-identical regardless of pool emission
             // order. Each pair re-resolves its bodies' CURRENT islands (an earlier
             // merge this step may have already united them -> MergeIslands is a
@@ -1382,55 +1378,6 @@ namespace Manifold2D
                     src.manifold.points[p].tangentImpulse = cc.points[p].tangentImpulse;
                 }
             }
-        }
-
-        void ConstraintGraph::CollectTouchedEventPairs(std::vector<BroadphasePair>& out) const
-        {
-            // Events-as-byproduct derivation (Step stage 6). Walk the pool
-            // ascending-id (deterministic), collect {min,max} body-pairs for every
-            // event-relevant EXACTLY-OVERLAPPING contact, then sort + unique so a
-            // compound body's N^2 fixture-pairs collapse to ONE body-pair and the
-            // Begin/Stay order matches the old sorted-body-pair emission order.
-            // clear() keeps capacity.
-            //
-            // EXACT-OVERLAP, NOT speculative `touching`: the old ContactManager
-            // tested overlap via SlotsOverlap with margin 0, which reports a contact
-            // ONLY on STRICT penetration (depth > 0); a speculative gap (the manifold
-            // point a velocity-scaled margin emits at NEGATIVE separation) is NOT an
-            // event overlap. The pool's c.touching is pointCount>0 INCLUDING those
-            // speculative gaps (correct for the SOLVER feed), so event derivation
-            // must instead require a manifold point with separation > 0 -- byte-
-            // identical to the old margin-0 SlotsOverlap (a genuinely penetrating
-            // point reports the SAME positive separation regardless of the margin
-            // used to compute the manifold, and an exact edge-touch at separation==0
-            // is excluded by both, matching the old semantics).
-            auto exactlyOverlapping = [](const Contact& c) noexcept -> bool
-            {
-                for (int p = 0; p < c.manifold.pointCount; ++p)
-                {
-                    if (c.manifold.points[p].separation > Real(0))
-                    {
-                        return true;
-                    }
-                }
-                return false;
-            };
-            out.clear();
-            m_contactPool.ForEach(
-                [&](std::uint32_t /*id*/, const Contact& c)
-                {
-                    if (!c.eventRelevant || !exactlyOverlapping(c))
-                    {
-                        return;
-                    }
-                    const std::uint32_t a = c.bodyA < c.bodyB ? c.bodyA : c.bodyB;
-                    const std::uint32_t b = c.bodyA < c.bodyB ? c.bodyB : c.bodyA;
-                    out.push_back(BroadphasePair{ a, b });
-                });
-            std::sort(out.begin(), out.end());
-            out.erase(
-                std::unique(out.begin(), out.end()),
-                out.end());
         }
 
         const Contact& ConstraintGraph::PoolContact(std::uint32_t id) const

@@ -12,8 +12,9 @@
 //   * IslandManager -- island TOPOLOGY + the sleep pass (decomp step 1); the graph
 //     reaches it only through PhysicsWorld's existing island forwarders + the
 //     public IslandManager API (Attach/DetachContactAdjacency), never directly.
-//   * ContactManager -- the begin/stay/end EVENT machine; a downstream consumer of
-//     the graph's derived touched-pair list, never sees fixtures/manifolds/colors.
+//   * The event arrays -- contact begin/end/hit and the sensor pass live on
+//     PhysicsWorld (spec s6). The graph pushes begin/end through the world
+//     when a solver contact's touching bit flips; it never owns the arrays.
 //   * The solver -- consumes the EMITTED ContactConstraint array only (bucketed by
 //     the constraint's own `color` field); it never touches the pool or the
 //     coloring state and never learns the graph exists (ISolver seam preserved).
@@ -22,8 +23,6 @@
 //   * m_contactConstraints -- the emitted solver feed; SolverContext captures its
 //     raw .data() pointer ONCE per Step (the contact-side twin of the
 //     AwakeIndexData() handoff). The graph fills a caller-provided vector.
-//   * m_touchedEventPairs -- the stage-output buffer handed to ContactManager
-//     (CollectTouchedEventPairs fills it).
 //   * The body/fixture SoA, awake/sleep state + awake-set mechanism, broadphase,
 //     and executor -- reached through PhysicsWorld& w under friendship.
 //
@@ -67,7 +66,7 @@ namespace Manifold2D
             // never enter m_colorContacts). The per-body mask grows via Grow.
             ConstraintGraph();
 
-            // ---- the per-Step drivers (PhysicsWorld::Step stages 2/3b/6) -----
+            // ---- the per-Step drivers (PhysicsWorld::Step stages 2/3b) --------
             //
             // UpdateContacts(w, dt): the ONE-PASS persistent-contact update
             // (Step stage 2). The SOLE narrowphase for the solver feed. Three
@@ -98,11 +97,6 @@ namespace Manifold2D
             // converged per-point impulses back onto each source Contact's
             // manifold (warm-start-on-Contact). Spans (kNoContact) skipped.
             void WritebackImpulses(const std::vector<ContactConstraint>& ccs);
-
-            // CollectTouchedEventPairs(out): Step stage 6 -- derive the deduped,
-            // sorted event-relevant EXACTLY-OVERLAPPING body-pairs from the pool
-            // (events-as-byproduct). The world hands `out` to ContactManager.
-            void CollectTouchedEventPairs(std::vector<BroadphasePair>& out) const;
 
             // ---- lifecycle-seam contact destruction (world drives these) -----
             // Destroy every pooled contact referencing the removed fixture/body

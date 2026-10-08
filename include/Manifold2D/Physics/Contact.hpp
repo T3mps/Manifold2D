@@ -14,9 +14,9 @@
 // is a DISTINCT key, so a stale contact never aliases a new fixture that lands
 // in the same slot.
 //
-// PHASE 3 NOTE: this is a pure data structure -- defined + unit-tested but NOT
-// yet consumed by the Step path, so it introduces no behavior change. Events
-// stay in ContactManager; the Contact carries only what the solver feed needs.
+// PHASE 3 NOTE: this is a pure data structure. The Step path now owns the pool.
+// Contact begin/end/hit live in the world's event arrays (spec s6); the Contact
+// carries the solver feed plus the event bits fixed at creation.
 //
 // PRESENTATION-FREE + C++20-clean: std + sibling Physics headers only. No
 // SDL3/NVRHI/Batcher2D/ImGui. Compiles both /MD (Arcane.dll) and static-CRT
@@ -58,7 +58,7 @@ namespace Manifold2D
         // Contact: one persistent contact per solver-relevant overlapping
         // fixture-pair. Survives across steps; the manifold is recomputed at
         // most once per step (a future UpdateContacts). Phase 3 carries only
-        // what the solver feed needs (events stay in ContactManager).
+        // what the solver feed needs, plus the event bits fixed at creation.
         // ----------------------------------------------------------------
         struct Contact
         {
@@ -83,18 +83,14 @@ namespace Manifold2D
             // body-type/sensor classification of a contact's pair is fixed for its
             // lifetime).
             bool          solverRelevant = false;
-            // EVENT relevance (collision-rebuild Phase 4, Task 2). The body-pair
-            // event machine (ContactManager) derives Begin/Stay/End ONLY from
-            // event-relevant touching contacts. True iff the contact's body-pair is
-            // NOT dynamic-vs-static-body: dynamic-vs-static is a SOLVER concern, not
-            // a gameplay trigger (the design's explicit exclusion). The only pooled
-            // pairs are mover-mover (dynamic/kinematic, sensors included),
-            // dynamic-static, and kinematic-static; tile spans live in the
-            // transient m_spanContacts scratch, never in m_contactPool, so they
-            // never reach event derivation. So eventRelevant is true for
-            // mover-mover + kinematic-static, false ONLY for dynamic-static.
-            // LIFETIME-INVARIANT like solverRelevant: set once at create, never
-            // updated on a HIT.
+            // Legacy pool classification (collision-rebuild Phase 4, Task 2).
+            // True for every pooled body-pair except dynamic-vs-static: mover-mover
+            // (dynamic/kinematic, sensors included) and kinematic-static. Tile
+            // spans never enter the pool. UpdateOneContact still refreshes an
+            // event-only pair (this bit set, solverRelevant clear) while both
+            // bodies sleep. Contact-event reporting is eventFlags, not this bit
+            // (spec s6.1 / s6.5: the create rule stays). LIFETIME-INVARIANT like
+            // solverRelevant: set once at create, never updated on a HIT.
             bool          eventRelevant = false;
             std::uint8_t  eventFlags = 0;   // kEvContact | kEvHit, fixed at create (Events.hpp)
             bool          beginReported = false; // set when a Begin was actually pushed; an End is pushed iff it is set (R10)

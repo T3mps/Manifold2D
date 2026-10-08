@@ -7,8 +7,8 @@
 //   Part 0 -- the GJK conservative-advancement core builder (BuildCore) now
 //             honors xf.rotation, making ShapeDistance / ShapeCast /
 //             ShapePolyDistance rotation-aware automatically.
-//   Part A -- ContactManager overlap (events / re-arm) is rotation + fixture
-//             aware via PhysicsWorld::SlotsOverlap.
+//   Part A -- sensor overlap is rotation + fixture aware. A kinematic-vs-static
+//             pair has no contact event (A9); detection is a sensor Begin.
 //   Part B -- Queries (RayVsBody, ShapeCast query, OverlapShape) iterate body
 //             fixtures with the composed real angle.
 //   Part C -- BulletSweep (CCD) sweeps the bullet's fixtures with real angle.
@@ -102,16 +102,18 @@ TEST_CASE("physics-v2 T7 (a): ShapeDistance honors rotation (rotated capsule)",
 }
 
 // ===========================================================================
-// (b) Part A -- ContactManager events are rotation + fixture aware.
+// (b) Part A -- sensor overlap is rotation + fixture aware.
 //
 // A static CIRCLE radius 0.2 at (0,0.6) and a KINEMATIC box-polygon
-// (half-extents 1 x 0.2) at the origin.
+// (half-extents 1 x 0.2) at the origin. Kinematic-vs-static makes no solver
+// contact (A9), so the circle is a sensor and both fixtures opt into sensor
+// events. The pair is not sensor-vs-sensor (A1).
 //   At angle 0 the box spans y in [-0.2,0.2]; the circle bottom is at y=0.4
-//     -> a gap of 0.2 -> NO overlap -> no Begin event.
+//     -> a gap of 0.2 -> NO overlap -> no sensor Begin.
 //   Rotated +pi/2 the box spans y in [-1,1]; it now overlaps the circle
-//     (whose center y=0.6 is well inside the box) -> a Begin event fires.
+//     (whose center y=0.6 is well inside the box) -> one sensor Begin.
 // ===========================================================================
-TEST_CASE("physics-v2 T7 (b): contact Begin fires only when the body is rotated",
+TEST_CASE("physics-v2 T7 (b): sensor Begin fires only when the body is rotated",
           "[physics][PhysicsQueryRotation]")
 {
     auto buildWorld = [](Real boxAngle) -> int
@@ -120,34 +122,28 @@ TEST_CASE("physics-v2 T7 (b): contact Begin fires only when the body is rotated"
         PhysicsWorld w(wd);
 
         BodyDef circ;
-        circ.type     = BodyType::Static;
-        circ.position = Vec2(Real(0), Real(0.6));
-        circ.shape    = MakeCircle(Real(0.2));
+        circ.type         = BodyType::Static;
+        circ.position     = Vec2(Real(0), Real(0.6));
+        circ.shape        = MakeCircle(Real(0.2));
+        circ.isSensor     = true;
+        circ.sensorEvents = true;
         w.AddBody(circ);
 
         BodyDef box;
-        box.type     = BodyType::Kinematic; // kinematic-vs-static emits events
-        box.position = Vec2(Real(0), Real(0));
-        box.shape    = MakeBoxPolygon(Real(1), Real(0.2));
+        box.type         = BodyType::Kinematic;
+        box.position     = Vec2(Real(0), Real(0));
+        box.shape        = MakeBoxPolygon(Real(1), Real(0.2));
+        box.sensorEvents = true;
         BodyHandle hb = w.AddBody(box);
         w.SetAngle(hb, boxAngle);
 
-        int beginCount = 0;
-        w.OnContact([&](const ContactEvent& ev)
-        {
-            if (ev.type == ContactEvent::Type::Begin)
-            {
-                ++beginCount;
-            }
-        });
-
         w.Step(kStep);
-        return beginCount;
+        return static_cast<int>(w.GetSensorEvents().begin.size());
     };
 
-    // Angle 0: no overlap -> no Begin.
+    // Angle 0: no overlap -> no sensor Begin.
     CHECK(buildWorld(Real(0)) == 0);
-    // Rotated pi/2: overlap -> Begin fires.
+    // Rotated pi/2: overlap -> one sensor Begin.
     CHECK(buildWorld(kHalfPi) == 1);
 }
 

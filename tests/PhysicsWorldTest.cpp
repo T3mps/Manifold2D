@@ -1,4 +1,6 @@
-// Physics M6 P1.8: PhysicsWorld core + Body + ContactManager + event gating.
+// Physics M6 P1.8: PhysicsWorld core + Body. Contact begin/end and sensor
+// overlap moved onto the event arrays (spec s6.5). Stay, the per-body gate,
+// and the re-arm burst are gone.
 //
 // PORT NOTE: a behavioral port of the physics_harness blocks
 // (Client/src/tests/physics_harness/main.lua):
@@ -6,21 +8,17 @@
 //     integration + drawPosition lerp, statics never integrate, QueryAABB,
 //     handle generation (removal invalidates; slot reuse keeps stale invalid),
 //     run-twice determinism.
-//   * "== ContactManager events ==" (~339-379): apart -> 0 events; jump-next
-//     -> begin; next step -> exactly one stay; move apart -> end; static
-//     sensor overlap -> begin with sensor flag; events carry valid handles.
-//   * "== event gating ==" (~381-418): baseline begin; per-body mute drops
-//     (no synthetic end); re-enable while overlapping -> fresh begin (re-arm);
-//     next step -> stay; world gate off -> 0 events; world gate on -> fresh
-//     begin (re-arm overlapping).
+//   * "== contact events ==" (~339-379): apart -> 0 begins; overlap -> one
+//     Begin; still touching -> no further Begin/End (GetBodyContacts); separate
+//     -> End. A static sensor overlap -> one sensor Begin with valid handles.
 //
 // The expected values are the literals from the harness (coordinate-agnostic,
 // no Map/iso needed: the world is built with NO passability source and bodies
-// are placed at plain world coords, meters since MKS P4). A std::vector<ContactEvent> capture
-// listener records the event stream. The narrowphase / broadphase are the same
+// are placed at plain world coords, meters since MKS P4). EventLog copies
+// GetContactEvents / GetSensorEvents. The narrowphase / broadphase are the same
 // modules the Lua harness exercised, so the overlap decisions match.
 //
-// PRESENTATION-FREE + C++20-clean.
+// PRESENTATION-FREE + C++23-clean.
 
 #include <cstdint>
 #include <vector>
@@ -32,7 +30,7 @@
 #include <Manifold2D/Physics/Shapes.hpp>
 #include <Manifold2D/Physics/Body.hpp>
 #include <Manifold2D/Physics/PhysicsWorld.hpp>
-#include <Manifold2D/Physics/ContactManager.hpp>
+#include "PhysicsEventTestHelpers.hpp"
 
 using namespace Manifold2D::Physics;
 using Catch::Approx;
@@ -40,21 +38,6 @@ using Catch::Approx;
 namespace
 {
     constexpr Real kStep = Real(1) / Real(60);
-
-    // Capture listener: records the event type stream + the last full event.
-    struct Capture
-    {
-        std::vector<ContactEvent::Type> types;
-        ContactEvent                    last{};
-        bool                            any = false;
-
-        void operator()(const ContactEvent& ev)
-        {
-            types.push_back(ev.type);
-            last = ev;
-            any  = true;
-        }
-    };
 }
 
 // ---------------------------------------------------------------------------
@@ -206,162 +189,88 @@ TEST_CASE("PhysicsWorld: Body view forwards to the world", "[physics][world]")
 }
 
 // ---------------------------------------------------------------------------
-// ContactManager events
+// Contact begin / end (spec s6.1). The harness's kinematic pair has no solver
+// contact (A9), so this is a dynamic box against a static floor. Stay is gone
+// (s6.5); "still touching" is GetBodyContacts.
 // ---------------------------------------------------------------------------
 
-TEST_CASE("ContactManager: begin/stay/end/sensor events fire deterministically",
+TEST_CASE("contact begin and end fire when a dynamic pair overlaps and separates",
           "[physics][contacts]")
 {
-    WorldDef wd;
-    PhysicsWorld w(wd);
-    Capture cap;
-    w.OnContact([&cap](const ContactEvent& ev) { cap(ev); });
+    PhysicsWorld w{ WorldDef{} };
 
-    BodyDef ad;
-    ad.type     = BodyType::Kinematic;
-    ad.position = Vec2(Real(0), Real(0));
-    ad.shape    = MakeCircle(Real(0.5));
-    BodyHandle a = w.AddBody(ad);
+    BodyDef floor;
+    floor.type          = BodyType::Static;
+    floor.position      = Vec2(Real(0), Real(0.5)); // top face at y = 0
+    floor.shape         = MakeAabb(Real(10), Real(0.5));
+    floor.contactEvents = true;
+    const BodyHandle ground = w.AddBody(floor);
 
-    BodyDef bd;
-    bd.type     = BodyType::Kinematic;
-    bd.position = Vec2(Real(3), Real(0));
-    bd.shape    = MakeCircle(Real(0.5));
-    w.AddBody(bd);
+    BodyDef box;
+    box.type           = BodyType::Dynamic;
+    box.fixedRotation  = true; // dynamic AABBs require fixedRotation
+    box.position       = Vec2(Real(0), Real(-3)); // clear of the floor
+    box.shape          = MakeAabb(Real(0.5), Real(0.5));
+    box.contactEvents  = true;
+    box.restitution    = Real(0);
+    const BodyHandle body = w.AddBody(box);
 
-    // apart: no events
-    w.Step(kStep);
-    REQUIRE(cap.types.empty());
+    EventTest::EventLog log;
+    log.StepAndCollect(w, 1); // gravity cannot close a 2.5 m gap in one step
+    REQUIRE(log.begin.empty());
+    REQUIRE(log.end.empty());
 
-    // jump next to b in one step -> begin
-    w.SetVelocity(a, Vec2(Real(6 * 25), Real(0))); // 150 m/s, well under the 400 cap
-    w.Step(kStep);
-    w.SetVelocity(a, Vec2(Real(0), Real(0)));
-    REQUIRE_FALSE(cap.types.empty());
-    REQUIRE(cap.types.back() == ContactEvent::Type::Begin);
+    // Overlap the floor by 0.1 m (box spans y [-0.9, 0.1], floor starts at 0).
+    w.SetPosition(body, Vec2(Real(0), Real(-0.4)));
+    log.StepAndCollect(w, 1);
+    REQUIRE(log.begin.size() == 1);
+    CHECK(log.end.empty());
+    CHECK(log.begin[0].bodyA == body);   // canonical: A is the dynamic side
+    CHECK(log.begin[0].bodyB == ground);
+    CHECK(w.IsValid(log.begin[0].bodyA));
+    CHECK(w.IsValid(log.begin[0].bodyB));
 
-    // next step -> exactly one stay
-    const std::size_t before = cap.types.size();
-    w.Step(kStep);
-    REQUIRE(cap.types.back() == ContactEvent::Type::Stay);
-    REQUIRE(cap.types.size() == before + 1);
+    std::vector<BodyContact> touching;
+    w.GetBodyContacts(body, touching);
+    REQUIRE_FALSE(touching.empty());     // still a contact; there is no Stay event
 
-    // move apart -> end
-    w.SetVelocity(a, Vec2(Real(-6 * 25), Real(0)));
-    w.Step(kStep);
-    w.SetVelocity(a, Vec2(Real(0), Real(0)));
-    REQUIRE(cap.types.back() == ContactEvent::Type::End);
+    log.StepAndCollect(w, 1);            // resting: no second Begin, no End
+    CHECK(log.begin.size() == 1);
+    CHECK(log.end.empty());
+
+    w.SetPosition(body, Vec2(Real(0), Real(-5)));
+    log.StepAndCollect(w, 2);
+    CHECK(log.end.size() == 1);
+    CHECK(log.end[0].bodyA == body);
+    CHECK(log.end[0].bodyB == ground);
 }
 
-TEST_CASE("ContactManager: static sensor overlap carries sensor flag + handles",
+TEST_CASE("static sensor overlap reports a sensor begin with valid handles",
           "[physics][contacts]")
 {
-    WorldDef wd;
-    PhysicsWorld w(wd);
+    PhysicsWorld w{ WorldDef{} };
 
     BodyDef ad;
-    ad.type     = BodyType::Kinematic;
-    ad.position = Vec2(Real(0), Real(0));
-    ad.shape    = MakeCircle(Real(0.5));
-    w.AddBody(ad);
-
-    // Capture the full last event (sensor flag + handles).
-    ContactEvent rec{};
-    bool got = false;
-    w.OnContact([&rec, &got](const ContactEvent& ev) { rec = ev; got = true; });
+    ad.type         = BodyType::Kinematic;
+    ad.position     = Vec2(Real(0), Real(0));
+    ad.shape        = MakeCircle(Real(0.5));
+    ad.sensorEvents = true;
+    const BodyHandle kin = w.AddBody(ad);
 
     BodyDef sd;
-    sd.type     = BodyType::Static;
-    sd.position = Vec2(Real(0), Real(0));
-    sd.shape    = MakeAabb(Real(0.8), Real(0.8));
-    sd.isSensor = true;
-    w.AddBody(sd);
+    sd.type         = BodyType::Static;
+    sd.position     = Vec2(Real(0), Real(0));
+    sd.shape        = MakeAabb(Real(0.8), Real(0.8));
+    sd.isSensor     = true;
+    sd.sensorEvents = true;
+    const BodyHandle sens = w.AddBody(sd);
 
     w.Step(kStep);
-    REQUIRE(got);
-    REQUIRE(rec.type == ContactEvent::Type::Begin);
-    REQUIRE(rec.sensor); // sensor flag rides the event
-    REQUIRE(w.IsValid(rec.a));
-    REQUIRE(w.IsValid(rec.b)); // event carries valid handles
-}
-
-// ---------------------------------------------------------------------------
-// event gating (two-granularity: per-body + world gate)
-// ---------------------------------------------------------------------------
-
-TEST_CASE("Event gating: per-body mute drops + re-arm emits fresh begin",
-          "[physics][contacts][gating]")
-{
-    WorldDef wd;
-    PhysicsWorld w(wd);
-    Capture cap;
-    w.OnContact([&cap](const ContactEvent& ev) { cap(ev); });
-
-    BodyDef ad;
-    ad.type     = BodyType::Kinematic;
-    ad.position = Vec2(Real(0), Real(0));
-    ad.shape    = MakeCircle(Real(0.6));
-    BodyHandle a = w.AddBody(ad);
-
-    BodyDef cd;
-    cd.type     = BodyType::Kinematic;
-    cd.position = Vec2(Real(0.5), Real(0)); // overlapping a (dist 0.5 < 1.2 = sumR)
-    cd.shape    = MakeCircle(Real(0.6));
-    w.AddBody(cd);
-
-    // baseline begin
-    w.Step(kStep);
-    REQUIRE(cap.types.back() == ContactEvent::Type::Begin);
-
-    // mute one participant: stays stop, NO synthetic end is queued (drop)
-    w.SetBodyEvents(a, false);
-    cap.types.clear();
-    w.Step(kStep);
-    REQUIRE(cap.types.empty());
-
-    // re-enable while still overlapping: fresh begin IMMEDIATELY (re-arm)
-    w.SetBodyEvents(a, true);
-    REQUIRE_FALSE(cap.types.empty());
-    REQUIRE(cap.types.back() == ContactEvent::Type::Begin);
-
-    // next step -> resumes staying
-    cap.types.clear();
-    w.Step(kStep);
-    REQUIRE(cap.types.back() == ContactEvent::Type::Stay);
-}
-
-TEST_CASE("Event gating: world gate drops everything + re-arms overlapping",
-          "[physics][contacts][gating]")
-{
-    WorldDef wd;
-    PhysicsWorld w(wd);
-    Capture cap;
-    w.OnContact([&cap](const ContactEvent& ev) { cap(ev); });
-
-    BodyDef ad;
-    ad.type     = BodyType::Kinematic;
-    ad.position = Vec2(Real(0), Real(0));
-    ad.shape    = MakeCircle(Real(0.6));
-    w.AddBody(ad);
-
-    BodyDef cd;
-    cd.type     = BodyType::Kinematic;
-    cd.position = Vec2(Real(0.5), Real(0));
-    cd.shape    = MakeCircle(Real(0.6));
-    w.AddBody(cd);
-
-    // baseline begin
-    w.Step(kStep);
-    REQUIRE(cap.types.back() == ContactEvent::Type::Begin);
-
-    // world gate off -> 0 events (drop)
-    w.SetEventsEnabled(false);
-    cap.types.clear();
-    w.Step(kStep);
-    REQUIRE(cap.types.empty());
-
-    // world gate on -> fresh begin (re-arm overlapping pairs)
-    w.SetEventsEnabled(true);
-    REQUIRE_FALSE(cap.types.empty());
-    REQUIRE(cap.types.back() == ContactEvent::Type::Begin);
+    const SensorEvents ev = w.GetSensorEvents();
+    REQUIRE(ev.begin.size() == 1);                 // the sensor channel is the sensor flag
+    CHECK(ev.begin[0].sensorBody == sens);
+    CHECK(ev.begin[0].visitorBody == kin);
+    CHECK(w.IsValid(ev.begin[0].sensorBody));
+    CHECK(w.IsValid(ev.begin[0].visitorBody));
+    CHECK(w.GetContactEvents().begin.empty());     // a sensor pair is not a contact begin
 }

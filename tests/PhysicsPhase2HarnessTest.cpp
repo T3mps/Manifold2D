@@ -43,8 +43,8 @@
 //   Lua-GC-specific; there is no analogous C++ garbage-collection concern.
 //   The C++ engine's zero-steady-state-allocation contract is instead
 //   contractually guaranteed by the PhysicsWorld doc comment (SoA vectors
-//   only grow, broadphase pools nodes, ContactManager reuses pair map +
-//   scratch; no per-Step heap after warmup) and structurally enforced by the
+//   only grow, broadphase pools nodes, event buffers reuse capacity;
+//   no per-Step heap after warmup) and structurally enforced by the
 //   SoA layout itself.
 //
 // NOTE on the joint in the dynamics replay scene:
