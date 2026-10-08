@@ -34,13 +34,13 @@ library (Box2D v3 model). It is developed here and vendored into consumers
   (gcc/clang). No `/fp:fast`. UTF-8 without BOM, ASCII comments.
 - **Units are MKS** (meters/kg/seconds); default gravity `(0, 10)` y-down.
 
-## Build + test (Windows)
+## Build + test
 
-```bat
-scripts\generate_vs2022.bat
-msbuild Manifold2D.sln /p:Configuration=Debug /m
-bin\Debug-windows-x86_64\Manifold2DTests\Manifold2DTests.exe
+```
+scripts/build.ps1 <Config>  /  scripts/build.sh <Config>
+scripts/run-tests.ps1 <Config> [--rng-seed N]  /  scripts/run-tests.sh <Config> [--rng-seed N]
 ```
 
-Configurations: Debug / Release / Dist. Linux (`gmake2`) is scaffolded, not yet
-green.
+Configurations: Debug / Release / Dist. Windows (MSVC), Linux (GCC 14, Clang
+19) and macOS (Apple Clang, arm64) are green in CI; see `docs/ci.md` for the
+matrix, seeds and the cross-platform determinism rules.

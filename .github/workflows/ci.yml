@@ -1,29 +1,118 @@
+# Manifold2D CI -- the shared Starworks tri-platform standard (see docs/ci.md).
+# One matrix: OS x compiler x config. Every leg runs the SAME entry points:
+#   build:  scripts/build.{ps1,sh} <Config>
+#   test:   scripts/run-tests.{ps1,sh} <Config> --rng-seed <N>   (two seeds)
+# A final job diffs the cross-platform determinism dumps of all legs.
 name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  XCODE_VERSION: "16.4"   # macOS toolchain pin (xcode-select)
+  SEED_A: "1"             # fixed seeds: reproducible, documented in docs/ci.md
+  SEED_B: "24301"
 
 jobs:
-  windows-msvc:
-    runs-on: windows-latest
+  build-test:
+    name: ${{ matrix.leg }}-${{ matrix.config }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [Debug, Release]
+        leg: [windows-msvc, linux-gcc14, linux-clang19, macos-appleclang]
+        include:
+          - leg: windows-msvc
+            os: windows-2025
+            shell: pwsh
+            ext: ps1
+          - leg: linux-gcc14
+            os: ubuntu-24.04
+            shell: bash
+            ext: sh
+            cc: gcc-14
+            cxx: g++-14
+          - leg: linux-clang19
+            os: ubuntu-24.04
+            shell: bash
+            ext: sh
+            cc: clang-19
+            cxx: clang++-19
+          - leg: macos-appleclang
+            os: macos-15
+            shell: bash
+            ext: sh
+            cc: clang
+            cxx: clang++
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Add MSBuild to PATH
-        uses: microsoft/setup-msbuild@v2
+      - name: Install Clang 19
+        if: matrix.leg == 'linux-clang19'
+        run: |
+          if ! command -v clang++-19 >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends clang-19
+          fi
 
-      # The repo vendors premake5.exe (vendor/premake5/), so generation needs no
-      # download and stays version-locked to what the library was authored against.
-      - name: Generate (VS2022 solution)
-        run: .\vendor\premake5\premake5.exe vs2022
+      - name: Select Xcode ${{ env.XCODE_VERSION }}
+        if: runner.os == 'macOS'
+        run: |
+          sudo xcode-select -s "/Applications/Xcode_${XCODE_VERSION}.app/Contents/Developer"
+          xcodebuild -version
 
-      - name: Build Release
-        run: msbuild Manifold2D.sln /p:Configuration=Release /m /nologo
+      - name: Build ${{ matrix.config }}
+        run: scripts/build.${{ matrix.ext }} ${{ matrix.config }}
 
-      - name: Test Release
-        run: .\bin\Release-windows-x86_64\Manifold2DTests\Manifold2DTests.exe
+      - name: Test ${{ matrix.config }} (seed ${{ env.SEED_A }})
+        run: scripts/run-tests.${{ matrix.ext }} ${{ matrix.config }} --rng-seed ${{ env.SEED_A }}
 
-  # A Linux job (gcc + clang) is added in Part B, after the cross-platform
-  # burn-down passes. Part A ships the windows-msvc job only -- no red CI.
+      - name: Test ${{ matrix.config }} (seed ${{ env.SEED_B }})
+        if: ${{ !cancelled() }}
+        run: scripts/run-tests.${{ matrix.ext }} ${{ matrix.config }} --rng-seed ${{ env.SEED_B }}
+
+      - name: Upload test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.leg }}-${{ matrix.config }}
+          path: test-results/
+          if-no-files-found: error
+
+  determinism:
+    name: cross-platform-determinism
+    needs: build-test
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: legs
+
+      - name: Compare determinism dumps across all legs
+        run: python3 scripts/compare-determinism.py legs --expect 8
