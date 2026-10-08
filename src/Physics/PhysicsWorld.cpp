@@ -1945,7 +1945,8 @@ namespace Manifold2D
             }
             m_eventsEnabled = on;
             // Begin events gate on m_eventsEnabled. An End is delivered iff its
-            // Begin was (Contact::beginReported, R10), even after the gate closes.
+            // Begin was (Contact::beginReported, R10; SensorOverlap::beginReported,
+            // R12), even after the gate closes.
             // Legacy listener: on->off Disarm all, off->on Rearm all overlapping.
             // Ports setEventsEnabled. Stays until M7 removes ContactManager.
             if (on)
@@ -2490,8 +2491,9 @@ namespace Manifold2D
                     }
                 }
 
-                // Sensor pass writes no simulation state. Pushes are gated inside
-                // PushSensorBegin / PushSensorEnd; overlap memory always updates.
+                // Sensor pass writes no simulation state. Begin pushes gate on
+                // m_eventsEnabled; Ends follow SensorOverlap::beginReported (R12).
+                // Overlap memory always updates.
                 RunSensorPass();
 
                 const auto pairLess = [](const auto& l, const auto& r) noexcept
@@ -2544,26 +2546,29 @@ namespace Manifold2D
         }
 
         void PhysicsWorld::PushSensorBegin(FixtureHandle sensor, BodyHandle sensorBody,
-                                           const SensorOverlap& overlap)
+                                           SensorOverlap& overlap)
         {
-            // Gate drops the push. Overlap state is updated by the caller either way.
+            // R12: record delivery on the overlap RunSensorPass keeps (in `now`,
+            // then swapped into m_sensorState). A closed gate drops the push and
+            // leaves the bit clear, so a later End is not emitted.
             if (!m_eventsEnabled) return;
             m_sensorBeginEvents.push_back(SensorBeginEvent{
                 sensor, overlap.visitor, sensorBody, overlap.visitorBody });
+            overlap.beginReported = true;
         }
 
         void PhysicsWorld::PushSensorEnd(FixtureHandle sensor, BodyHandle sensorBody,
-                                         const SensorOverlap& overlap)
+                                         SensorOverlap& overlap)
         {
-            // Same gate as Begin. R10's beginReported pairing is contact-only;
-            // a sensor End that happens while the gate is off is dropped, and the
-            // overlap is already forgotten, so re-enabling does not emit it.
+            // R12: iff a Begin was actually pushed, regardless of the gate now.
             // Into the CURRENT end buffer (Box2D world.c:668): this step's pass
             // writes it, then stage 6b flips. A sensor removed between steps is
             // ended by the next step's pass, which writes the buffer that step flips.
-            if (!m_eventsEnabled) return;
+            // Clear only after the push so a throwing allocation does not drop the bit.
+            if (!overlap.beginReported) return;
             m_sensorEndEvents[m_endEventIndex].push_back(SensorEndEvent{
                 sensor, overlap.visitor, sensorBody, overlap.visitorBody });
+            overlap.beginReported = false;
         }
 
         SensorEvents PhysicsWorld::GetSensorEvents() const noexcept
@@ -2575,7 +2580,7 @@ namespace Manifold2D
         bool PhysicsWorld::FixturesOverlapExact(std::uint32_t fa, std::uint32_t fb) const
         {
             // Same world-transform composition as DebugCollide (this file, the
-            // ComposeFixtureXf call there): body pose ∘ fixture local pose.
+            // ComposeFixtureXf call there): body pose composed with the fixture local pose.
             const std::uint32_t ba = m_fxBody[fa];
             const std::uint32_t bb = m_fxBody[fb];
             const Transform xfA = ComposeFixtureXf(
@@ -2640,7 +2645,7 @@ namespace Manifold2D
                 SensorState& st = m_sensorState[fi];
                 if (st.gen != m_fxGen[fi] && !st.overlaps.empty()) // slot recycled into a new sensor
                 {
-                    for (const SensorOverlap& o : st.overlaps)
+                    for (SensorOverlap& o : st.overlaps)
                     {
                         PushSensorEnd(FixtureHandle{ fi, st.gen }, st.body, o);
                     }
@@ -2651,7 +2656,7 @@ namespace Manifold2D
                 st.body = HandleOf(sb);
                 if (m_fxSensorEvents[fi] == 0u) // flag off: end what it held (sensor.c:158)
                 {
-                    for (const SensorOverlap& o : st.overlaps)
+                    for (SensorOverlap& o : st.overlaps)
                     {
                         PushSensorEnd(FixtureHandle{ fi, st.gen }, st.body, o);
                     }
@@ -2688,6 +2693,9 @@ namespace Manifold2D
                     }
                     else
                     {
+                        // Same visitor. `now[j]` is a fresh overlap; keep the bit so
+                        // a Begin delivered on an earlier pass still closes (R12).
+                        now[j].beginReported = st.overlaps[i].beginReported;
                         ++i;
                         ++j;
                     }
@@ -2701,7 +2709,7 @@ namespace Manifold2D
             {
                 if (visited[fi] != 0u || m_sensorState[fi].overlaps.empty()) continue;
                 SensorState& st = m_sensorState[fi];
-                for (const SensorOverlap& o : st.overlaps)
+                for (SensorOverlap& o : st.overlaps)
                 {
                     PushSensorEnd(FixtureHandle{ fi, st.gen }, st.body, o);
                 }

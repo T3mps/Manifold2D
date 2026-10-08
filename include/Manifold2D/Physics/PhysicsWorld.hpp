@@ -1349,6 +1349,9 @@ namespace Manifold2D
             {
                 FixtureHandle visitor{};
                 BodyHandle    visitorBody{};
+                // Set only when PushSensorBegin actually pushed (R12). An End is
+                // delivered iff this is set, even after the world gate closes.
+                bool          beginReported = false;
             };
             // Per fixture slot, aligned with m_fxGen. gen/body name the sensor
             // that owns `overlaps`. A gen mismatch means the slot was recycled.
@@ -1359,11 +1362,13 @@ namespace Manifold2D
                 std::vector<SensorOverlap> overlaps;
             };
 
-            // Sensor begin/end. Both return immediately when the world gate is
-            // off. RunSensorPass still updates overlap state, so re-enabling
-            // does not burst. R10 (End iff Begin) is contact events only.
-            void PushSensorBegin(FixtureHandle sensor, BodyHandle sensorBody, const SensorOverlap& overlap);
-            void PushSensorEnd(FixtureHandle sensor, BodyHandle sensorBody, const SensorOverlap& overlap);
+            // Sensor begin/end (R12: an End is delivered iff its Begin was).
+            // Begin pushes only while m_eventsEnabled is set, and sets beginReported
+            // on the overlap. End pushes iff beginReported, ignoring the gate, then
+            // clears the bit. Overlap membership still updates when the gate is off,
+            // so re-enabling does not burst.
+            void PushSensorBegin(FixtureHandle sensor, BodyHandle sensorBody, SensorOverlap& overlap);
+            void PushSensorEnd(FixtureHandle sensor, BodyHandle sensorBody, SensorOverlap& overlap);
 
             // End-of-step sensor pass (Box2D 3.1.1 sensor.c b2OverlapSensors, spec s6.1).
             void RunSensorPass();

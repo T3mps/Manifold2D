@@ -96,3 +96,50 @@ TEST_CASE("Removing a sensor ends its overlaps", "[physics][events]")
     log.StepAndCollect(w, 1);
     CHECK(log.sensorEnd.size() == 1);
 }
+
+TEST_CASE("a sensor Begin reported while open still gets its End when the gate is closed", "[physics][events]")
+{
+    PhysicsWorld w{ WorldDef{} };
+    AddStaticSensor(w, Real(0), Real(0));
+    const BodyHandle b = AddBox(w, Real(0), Real(0));
+    EventLog log;
+    log.StepAndCollect(w, 1);                          // overlap begins while the gate is open
+    REQUIRE(log.sensorBegin.size() == 1);
+    CHECK(log.sensorEnd.empty());
+    w.SetEventsEnabled(false);
+    w.SetPosition(b, Vec2(Real(0), Real(-10)));        // leave while gated
+    log.StepAndCollect(w, 1);
+    CHECK(log.sensorBegin.size() == 1);                // no further Begin
+    CHECK(log.sensorEnd.size() == 1);                  // the reported Begin still closes (R12)
+}
+
+TEST_CASE("an overlap begun while gated never produces an End after re-enable", "[physics][events]")
+{
+    PhysicsWorld w{ WorldDef{} };
+    AddStaticSensor(w, Real(0), Real(0));
+    const BodyHandle b = AddBox(w, Real(0), Real(0));
+    w.SetEventsEnabled(false);
+    EventLog log;
+    log.StepAndCollect(w, 1);                          // enters while gated
+    CHECK(log.sensorBegin.empty());
+    w.SetEventsEnabled(true);
+    w.SetPosition(b, Vec2(Real(0), Real(-10)));        // leaves after re-enable
+    log.StepAndCollect(w, 1);
+    CHECK(log.sensorBegin.empty());                    // no Begin was ever delivered
+    CHECK(log.sensorEnd.empty());                      // so no End (R12)
+}
+
+TEST_CASE("re-enabling while overlapping emits no burst", "[physics][events]")
+{
+    PhysicsWorld w{ WorldDef{} };
+    AddStaticSensor(w, Real(0), Real(0));
+    AddBox(w, Real(0), Real(0));
+    w.SetEventsEnabled(false);
+    EventLog log;
+    log.StepAndCollect(w, 1);                          // overlap begins while gated
+    CHECK(log.sensorBegin.empty());
+    w.SetEventsEnabled(true);
+    log.StepAndCollect(w, 1);                          // still overlapping
+    CHECK(log.sensorBegin.empty());                    // no burst
+    CHECK(log.sensorEnd.empty());
+}
